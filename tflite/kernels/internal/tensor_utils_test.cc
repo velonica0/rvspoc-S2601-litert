@@ -24,6 +24,7 @@ limitations under the License.
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/quantization_util.h"
+#include "tflite/kernels/internal/reference/portable_tensor_utils_impl.h"
 #include "tflite/kernels/test_util.h"
 
 #ifdef DOTPROD_BENCHMARKS
@@ -359,6 +360,31 @@ TEST(uKernels, MatrixBatchVectorMultiplyAccumulateTest) {
                                       output.data());
   EXPECT_THAT(output, ElementsAreArray(ArrayFloatNear({1., 5., 13.,  //
                                                        -1., 7., 23.})));
+}
+
+TEST(uKernels, MatrixBatchVectorMultiplyAccumulateMatchesPortableFloatTest) {
+  constexpr int kRows = 7;
+  constexpr int kCols = 35;
+  constexpr int kBatch = 3;
+
+  std::vector<float> matrix(kRows * kCols);
+  std::vector<float> vector(kCols * kBatch);
+  for (int i = 0; i < matrix.size(); ++i) {
+    matrix[i] = static_cast<float>((i % 17) - 8) * 0.25f;
+  }
+  for (int i = 0; i < vector.size(); ++i) {
+    vector[i] = static_cast<float>((i % 11) - 5) * 0.5f;
+  }
+
+  std::vector<float> actual(kRows * kBatch, 0.75f);
+  std::vector<float> expected = actual;
+
+  PortableMatrixBatchVectorMultiplyAccumulate(
+      matrix.data(), kRows, kCols, vector.data(), kBatch, expected.data());
+  MatrixBatchVectorMultiplyAccumulate(matrix.data(), kRows, kCols, vector.data(),
+                                      kBatch, actual.data());
+
+  EXPECT_THAT(actual, ElementsAreArray(ArrayFloatNear(expected)));
 }
 
 // Quantized matmul with 2 * 30 input and 9 * 30 matrix.
@@ -1927,6 +1953,16 @@ TEST(uKernels, BatchVectorBatchVectorDotProductTest) {
   EXPECT_THAT(output, ElementsAreArray(ArrayFloatNear({0.5, 1.75})));
 }
 
+TEST(uKernels, VectorVectorDotProductFloatTest) {
+  constexpr int kVectorSize = 7;
+  static float input1[kVectorSize] = {0.5f, -1.25f, 3.0f, -2.0f,
+                                      4.5f, 0.25f, -0.75f};
+  static float input2[kVectorSize] = {2.0f, -1.0f, 0.5f, 4.0f,
+                                      -0.5f, 8.0f, 2.0f};
+  const float dot = VectorVectorDotProduct(input1, input2, kVectorSize);
+  EXPECT_THAT(dot, testing::FloatNear(-6.5f, 1.0e-6f));
+}
+
 TEST(uKernels, BatchVectorBatchVectorDotProductIntegerTest) {
   constexpr int kVectorSize = 5;
   constexpr int kBatch = 2;
@@ -1969,6 +2005,17 @@ TEST(uKernels, ReductionSumVectorIntegerTest) {
   ReductionSumVector(input, result1.data(), kOutputVectorSize1,
                      kReductionSize1);
   EXPECT_THAT(result1, testing::ElementsAreArray({3, 6, -1, 3, 15}));
+}
+
+TEST(uKernels, ReductionSumVectorInt8Test) {
+  constexpr int kInputVectorSize = 12;
+  constexpr int kOutputVectorSize = 4;
+  constexpr int kReductionSize = 3;
+  static int8_t input[kInputVectorSize] = {10,  -3, 5,   -8, 4,  1,
+                                           100, -7, -5,  3,  -2, -1};
+  std::vector<int32_t> result(kOutputVectorSize);
+  ReductionSumVector(input, result.data(), kOutputVectorSize, kReductionSize);
+  EXPECT_THAT(result, testing::ElementsAreArray({12, -3, 88, 0}));
 }
 
 void TwoGateSaturatingAdd(const int8_t* input, int8_t input_zp,
@@ -2405,5 +2452,26 @@ BENCHMARK(BM_DotprodFloatMultiply)
     ->Args({2048, 2048, 4})
     ->Args({2048, 2048, 5})
     ->Args({2048, 2048, 8});
+
+void BM_DotprodFloatMultiplyPortable(benchmark::State& state) {
+  const int rows = state.range(0);
+  const int cols = state.range(1);
+  const int batch = state.range(2);
+  std::vector<float> matrix(rows * cols);
+  std::fill(matrix.begin(), matrix.end(), 1.0f);
+  std::vector<float> vector(cols * batch);
+  std::fill(vector.begin(), vector.end(), 0.3f);
+  std::vector<float> output(rows * batch);
+  for (auto _ : state) {
+    std::fill(output.begin(), output.end(), 0.0f);
+    PortableMatrixBatchVectorMultiplyAccumulate(
+        matrix.data(), rows, cols, vector.data(), batch, output.data());
+  }
+}
+
+BENCHMARK(BM_DotprodFloatMultiplyPortable)
+    ->Args({64, 64, 4})
+    ->Args({640, 2048, 4})
+    ->Args({1024, 1024, 8});
 
 #endif  // DOTPROD_BENCHMARKS
