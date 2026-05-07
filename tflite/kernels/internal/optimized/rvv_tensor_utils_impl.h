@@ -79,6 +79,22 @@ void RvvMatrixBatchVectorMultiplyAccumulate(
     int32_t n_batch, int32_t n_input, int32_t n_output, int32_t output_zp,
     int32_t* scratch, int8_t* output, CpuBackendContext* context);
 
+void RvvMatrixBatchVectorMultiply(const int8_t* input, int32_t input_zeropoint,
+                                  const int8_t* input_to_gate_weights,
+                                  int32_t input_to_gate_effective_scale_a,
+                                  int32_t input_to_gate_effective_scale_b,
+                                  int32_t n_batch, int32_t n_input,
+                                  int32_t n_cell, int8_t* gate_output,
+                                  int8_t gate_output_zp);
+
+void RvvMatrixBatchVectorMultiply(const int16_t* hidden,
+                                  const int8_t* hidden_to_output_weights,
+                                  int32_t proj_effective_scale_a,
+                                  int32_t proj_effective_scale_b,
+                                  const int32_t* gate_bias, int32_t n_batch,
+                                  int32_t n_hidden, int32_t n_output,
+                                  int32_t output_zp, int8_t* proj_output);
+
 void RvvMatrixScalarMultiplyAccumulate(const int8_t* matrix, int32_t scalar,
                                        int32_t n_row, int32_t n_col,
                                        int32_t* output);
@@ -110,11 +126,23 @@ void RvvApplyLayerNorm(const int16_t* input, const int16_t* layer_norm_weights,
                        int32_t layer_norm_scale_b, int32_t variance_limit,
                        int n_batch, int n_input, int16_t* output);
 
+void RvvApplyLayerNormFloat(const int16_t* input,
+                            const int16_t* layer_norm_weights,
+                            int32_t layer_norm_scale_a,
+                            int32_t layer_norm_scale_b, const int32_t* bias,
+                            int n_batch, int n_input, int16_t* output);
+
 void RvvApplySigmoid(const int16_t* input, int32_t n_batch, int32_t n_input,
                      int16_t* output);
 
+void RvvApplySigmoidFloat(const int16_t* input, int32_t n_batch,
+                          int32_t n_input, int16_t* output);
+
 void RvvApplyTanh(int32_t integer_bits, const int16_t* input, int32_t n_batch,
                   int32_t n_input, int16_t* output);
+
+void RvvApplyTanhFloat(const int16_t* input, int32_t n_batch, int32_t n_input,
+                       int32_t integer_bits, int16_t* output);
 
 void RvvCwiseMul(const int16_t* input_1, const int16_t* input_2, int n_batch,
                  int n_input, int shift, int16_t* output);
@@ -139,6 +167,10 @@ void RvvVectorBatchVectorCwiseProductAccumulate(const int16_t* vector,
                                                 int32_t multiplier, int shift,
                                                 int16_t* result);
 
+void RvvBatchVectorBatchVectorDotProduct(const int16_t* vector1,
+                                         const int16_t* vector2, int v_size,
+                                         int n_batch, int32_t* result);
+
 void RvvSub1Vector(const float* vector, int v_size, float* result);
 
 void RvvSub1Vector(const int16_t* vector, int v_size, int16_t* result);
@@ -149,11 +181,23 @@ void RvvVectorScalarMultiply(const int8_t* vector, int v_size, float scale,
 void RvvReductionSumVector(const float* input_vector, float* output_vector,
                            int output_size, int reduction_size);
 
+void RvvReductionSumVector(const int32_t* input_vector, int32_t* output_vector,
+                           int output_size, int reduction_size);
+
 void RvvReductionSumVector(const int8_t* input_vector, int32_t* output_vector,
                            int output_size, int reduction_size);
 
 void RvvMeanStddevNormalization(const float* input_vector, float* output_vector,
                                 int v_size, int n_batch);
+
+void RvvTwoGateSaturatingAdd(const int8_t* input, int8_t input_zp,
+                             const int8_t* recurrent, int8_t recurrent_zp,
+                             int32_t input_effective_scale_a,
+                             int32_t input_effective_scale_b,
+                             int32_t recurrent_effective_scale_a,
+                             int32_t recurrent_effective_scale_b,
+                             int32_t n_batch, int32_t n_cell,
+                             int16_t* output);
 
 #define RVV_OR_PORTABLE(funcname, ...) Rvv##funcname(__VA_ARGS__)
 

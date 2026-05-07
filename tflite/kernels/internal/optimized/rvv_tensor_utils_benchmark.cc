@@ -512,6 +512,67 @@ void BenchmarkFloatDotProduct(std::mt19937* rng) {
   std::cout << "\n";
 }
 
+void BenchmarkBatchVectorDotProductInt16(std::mt19937* rng) {
+  const BatchVectorCase cases[] = {
+      {"svdf_dot_q15_small", 4, 64},
+      {"svdf_dot_q15_mid", 8, 256},
+      {"svdf_dot_q15_large", 16, 1024},
+  };
+
+  std::cout << "## BatchVectorBatchVectorDotProduct<int16>\n\n";
+  std::cout << "- Affects: `svdf` and batched recurrent dot-product helper "
+               "paths.\n\n";
+  PrintIntHeader("Batch x size");
+
+  for (const BatchVectorCase& bench : cases) {
+    const int total = bench.batch * bench.size;
+    const int iterations = ChooseIterations(static_cast<int64_t>(total) * 2);
+    const std::vector<int16_t> lhs =
+        MakeRandomInt16Vector(total, rng, -1024, 1024);
+    const std::vector<int16_t> rhs =
+        MakeRandomInt16Vector(total, rng, -1024, 1024);
+    std::vector<int32_t> scalar_output(bench.batch, 0);
+    std::vector<int32_t> rvv_output(bench.batch, 0);
+
+    PortableBatchVectorBatchVectorDotProduct(lhs.data(), rhs.data(), bench.size,
+                                             bench.batch, scalar_output.data());
+    RvvBatchVectorBatchVectorDotProduct(lhs.data(), rhs.data(), bench.size,
+                                        bench.batch, rvv_output.data());
+    const IntAccuracy accuracy =
+        CompareIntegerVectors(scalar_output, rvv_output);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, 2.0 * total, [&]() -> double {
+          PortableBatchVectorBatchVectorDotProduct(
+              lhs.data(), rhs.data(), bench.size, bench.batch,
+              scalar_output.data());
+          return scalar_output.empty() ? 0.0 : scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, 2.0 * total, [&]() -> double {
+          RvvBatchVectorBatchVectorDotProduct(lhs.data(), rhs.data(), bench.size,
+                                              bench.batch, rvv_output.data());
+          return rvv_output.empty() ? 0.0 : rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.batch << " x "
+              << bench.size << " | " << iterations << " | " << std::fixed
+              << std::setprecision(2) << scalar_stats.mean_us << " | "
+              << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << accuracy.max_abs_diff << " | "
+              << accuracy.mismatches << " |\n";
+    if (accuracy.mismatches != 0) {
+      std::cerr << "BatchVectorBatchVectorDotProduct accuracy check failed for "
+                << bench.name << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
 void BenchmarkFloatReduction(std::mt19937* rng) {
   const ReductionCase cases[] = {
       {"svdf_small", 64, 8},
@@ -626,6 +687,66 @@ void BenchmarkInt8Reduction(std::mt19937* rng) {
               << accuracy.mismatches << " |\n";
     if (accuracy.mismatches != 0) {
       std::cerr << "Int8 reduction accuracy check failed for " << bench.name
+                << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
+void BenchmarkInt32Reduction(std::mt19937* rng) {
+  const ReductionCase cases[] = {
+      {"reduce_i32_small", 64, 32},
+      {"reduce_i32_mid", 128, 128},
+      {"reduce_i32_large", 256, 256},
+  };
+
+  std::cout << "## ReductionSumVector<int32>\n\n";
+  std::cout << "- Affects: scalar accumulation helper paths such as reference "
+               "SVDF and utility reductions.\n\n";
+  PrintIntHeader("Output x reduction");
+
+  for (const ReductionCase& bench : cases) {
+    const int64_t work =
+        static_cast<int64_t>(bench.output_size) * bench.reduction_size;
+    const int iterations = ChooseIterations(work);
+    const std::vector<int32_t> input =
+        MakeRandomInt32Vector(bench.output_size * bench.reduction_size, rng,
+                              -2048, 2048);
+    std::vector<int32_t> scalar_output(bench.output_size, 0);
+    std::vector<int32_t> rvv_output(bench.output_size, 0);
+
+    PortableReductionSumVector(input.data(), scalar_output.data(),
+                               bench.output_size, bench.reduction_size);
+    RvvReductionSumVector(input.data(), rvv_output.data(), bench.output_size,
+                          bench.reduction_size);
+    const IntAccuracy accuracy =
+        CompareIntegerVectors(scalar_output, rvv_output);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, static_cast<double>(work), [&]() -> double {
+          PortableReductionSumVector(input.data(), scalar_output.data(),
+                                     bench.output_size, bench.reduction_size);
+          return scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, static_cast<double>(work), [&]() -> double {
+          RvvReductionSumVector(input.data(), rvv_output.data(),
+                                bench.output_size, bench.reduction_size);
+          return rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.output_size << " x "
+              << bench.reduction_size << " | " << iterations << " | "
+              << std::fixed << std::setprecision(2) << scalar_stats.mean_us
+              << " | " << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << accuracy.max_abs_diff << " | "
+              << accuracy.mismatches << " |\n";
+    if (accuracy.mismatches != 0) {
+      std::cerr << "Int32 reduction accuracy check failed for " << bench.name
                 << "\n";
       std::exit(1);
     }
@@ -1085,6 +1206,149 @@ void BenchmarkGateMatVecInt8(std::mt19937* rng) {
               << accuracy.mismatches << " |\n";
     if (accuracy.mismatches != 0) {
       std::cerr << "Gate int8 matvec accuracy check failed for " << bench.name
+                << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
+void BenchmarkGateMatVecNoAccumulateInt8(std::mt19937* rng) {
+  const MatVecCase cases[] = {
+      {"gate_noacc_q8_small", 128, 128, 4},
+      {"gate_noacc_q8_mid", 256, 256, 4},
+      {"gate_noacc_q8_large", 512, 512, 8},
+  };
+  constexpr int32_t kInputZp = -7;
+  constexpr int32_t kMultiplier = 1347771520;
+  constexpr int32_t kShift = -8;
+  constexpr int32_t kOutputZp = -11;
+
+  std::cout << "## MatrixBatchVectorMultiply<int8 -> int8>\n\n";
+  std::cout << "- Affects: quantized LSTM gate matmul paths before "
+               "saturating-add and activation.\n\n";
+  PrintIntHeader("Rows x cols x batch");
+
+  for (const MatVecCase& bench : cases) {
+    const int64_t work =
+        static_cast<int64_t>(bench.rows) * bench.cols * bench.batch;
+    const int iterations = ChooseIterations(work);
+    const std::vector<int8_t> input =
+        MakeRandomInt8Vector(bench.batch * bench.cols, rng);
+    const std::vector<int8_t> weights =
+        MakeRandomInt8Vector(bench.rows * bench.cols, rng);
+    std::vector<int8_t> scalar_output(bench.batch * bench.rows, 0);
+    std::vector<int8_t> rvv_output(bench.batch * bench.rows, 0);
+
+    PortableMatrixBatchVectorMultiply(
+        input.data(), kInputZp, weights.data(), kMultiplier, kShift,
+        bench.batch, bench.cols, bench.rows, scalar_output.data(), kOutputZp);
+    RvvMatrixBatchVectorMultiply(
+        input.data(), kInputZp, weights.data(), kMultiplier, kShift,
+        bench.batch, bench.cols, bench.rows, rvv_output.data(), kOutputZp);
+    const IntAccuracy accuracy =
+        CompareIntegerVectors(scalar_output, rvv_output);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, 2.0 * work, [&]() -> double {
+          PortableMatrixBatchVectorMultiply(
+              input.data(), kInputZp, weights.data(), kMultiplier, kShift,
+              bench.batch, bench.cols, bench.rows, scalar_output.data(),
+              kOutputZp);
+          return scalar_output.empty() ? 0.0 : scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, 2.0 * work, [&]() -> double {
+          RvvMatrixBatchVectorMultiply(
+              input.data(), kInputZp, weights.data(), kMultiplier, kShift,
+              bench.batch, bench.cols, bench.rows, rvv_output.data(),
+              kOutputZp);
+          return rvv_output.empty() ? 0.0 : rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.rows << " x "
+              << bench.cols << " x " << bench.batch << " | " << iterations
+              << " | " << std::fixed << std::setprecision(2)
+              << scalar_stats.mean_us << " | " << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << accuracy.max_abs_diff << " | "
+              << accuracy.mismatches << " |\n";
+    if (accuracy.mismatches != 0) {
+      std::cerr << "MatrixBatchVectorMultiply<int8> accuracy check failed for "
+                << bench.name << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
+void BenchmarkProjectionMatVecInt8(std::mt19937* rng) {
+  const MatVecCase cases[] = {
+      {"proj_q8_small", 128, 128, 4},
+      {"proj_q8_mid", 256, 256, 4},
+      {"proj_q8_large", 512, 512, 8},
+  };
+  constexpr int32_t kMultiplier = 1347771520;
+  constexpr int32_t kShift = -8;
+  constexpr int32_t kOutputZp = -11;
+
+  std::cout << "## MatrixBatchVectorMultiply<int16 x int8 -> int8>\n\n";
+  std::cout << "- Affects: quantized projection/output matmul helper paths.\n\n";
+  PrintIntHeader("Rows x cols x batch");
+
+  for (const MatVecCase& bench : cases) {
+    const int64_t work =
+        static_cast<int64_t>(bench.rows) * bench.cols * bench.batch;
+    const int iterations = ChooseIterations(work);
+    const std::vector<int16_t> hidden =
+        MakeRandomInt16Vector(bench.batch * bench.cols, rng, -4096, 4096);
+    const std::vector<int8_t> weights =
+        MakeRandomInt8Vector(bench.rows * bench.cols, rng);
+    const std::vector<int32_t> bias =
+        MakeRandomInt32Vector(bench.rows, rng, -2048, 2048);
+    std::vector<int8_t> scalar_output(bench.batch * bench.rows, 0);
+    std::vector<int8_t> rvv_output(bench.batch * bench.rows, 0);
+
+    PortableMatrixBatchVectorMultiply(hidden.data(), weights.data(),
+                                      kMultiplier, kShift, bias.data(),
+                                      bench.batch, bench.cols, bench.rows,
+                                      kOutputZp, scalar_output.data());
+    RvvMatrixBatchVectorMultiply(hidden.data(), weights.data(), kMultiplier,
+                                 kShift, bias.data(), bench.batch, bench.cols,
+                                 bench.rows, kOutputZp, rvv_output.data());
+    const IntAccuracy accuracy =
+        CompareIntegerVectors(scalar_output, rvv_output);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, 2.0 * work, [&]() -> double {
+          PortableMatrixBatchVectorMultiply(
+              hidden.data(), weights.data(), kMultiplier, kShift, bias.data(),
+              bench.batch, bench.cols, bench.rows, kOutputZp,
+              scalar_output.data());
+          return scalar_output.empty() ? 0.0 : scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, 2.0 * work, [&]() -> double {
+          RvvMatrixBatchVectorMultiply(
+              hidden.data(), weights.data(), kMultiplier, kShift, bias.data(),
+              bench.batch, bench.cols, bench.rows, kOutputZp,
+              rvv_output.data());
+          return rvv_output.empty() ? 0.0 : rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.rows << " x "
+              << bench.cols << " x " << bench.batch << " | " << iterations
+              << " | " << std::fixed << std::setprecision(2)
+              << scalar_stats.mean_us << " | " << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << accuracy.max_abs_diff << " | "
+              << accuracy.mismatches << " |\n";
+    if (accuracy.mismatches != 0) {
+      std::cerr << "Projection matvec accuracy check failed for " << bench.name
                 << "\n";
       std::exit(1);
     }
@@ -1829,6 +2093,204 @@ void BenchmarkApplyTanh(std::mt19937* rng) {
   std::cout << "\n";
 }
 
+void BenchmarkApplyLayerNormFloat(std::mt19937* rng) {
+  const BatchVectorCase cases[] = {
+      {"lnf_small", 4, 64},
+      {"lnf_mid", 4, 256},
+      {"lnf_gate_like", 8, 1024},
+  };
+  constexpr int32_t kMultiplier = 1895840000;
+  constexpr int32_t kShift = -13;
+
+  std::cout << "## ApplyLayerNormFloat<int16>\n\n";
+  std::cout << "- Affects: float-reference layer-norm helper paths used by "
+               "quantized LSTM eval.\n\n";
+  PrintIntHeader("Batch x input");
+
+  for (const BatchVectorCase& bench : cases) {
+    const int total = bench.batch * bench.size;
+    const int iterations = ChooseIterations(static_cast<int64_t>(total) * 8);
+    const std::vector<int16_t> input =
+        MakeRandomInt16Vector(total, rng, -1500, 1500);
+    const std::vector<int16_t> weights =
+        MakeRandomInt16Vector(bench.size, rng, 12000, 28000);
+    const std::vector<int32_t> bias =
+        MakeRandomInt32Vector(bench.size, rng, -16000000, -12000000);
+    std::vector<int16_t> scalar_output(total, 0);
+    std::vector<int16_t> rvv_output(total, 0);
+
+    PortableApplyLayerNormFloat(input.data(), weights.data(), kMultiplier,
+                                kShift, bias.data(), bench.batch, bench.size,
+                                scalar_output.data());
+    RvvApplyLayerNormFloat(input.data(), weights.data(), kMultiplier, kShift,
+                           bias.data(), bench.batch, bench.size,
+                           rvv_output.data());
+    const IntAccuracy accuracy =
+        CompareIntegerVectors(scalar_output, rvv_output);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, 8.0 * total, [&]() -> double {
+          PortableApplyLayerNormFloat(
+              input.data(), weights.data(), kMultiplier, kShift, bias.data(),
+              bench.batch, bench.size, scalar_output.data());
+          return scalar_output.empty() ? 0.0 : scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, 8.0 * total, [&]() -> double {
+          RvvApplyLayerNormFloat(input.data(), weights.data(), kMultiplier,
+                                 kShift, bias.data(), bench.batch, bench.size,
+                                 rvv_output.data());
+          return rvv_output.empty() ? 0.0 : rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.batch << " x "
+              << bench.size << " | " << iterations << " | " << std::fixed
+              << std::setprecision(2) << scalar_stats.mean_us << " | "
+              << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << accuracy.max_abs_diff << " | "
+              << accuracy.mismatches << " |\n";
+    if (accuracy.mismatches != 0) {
+      std::cerr << "ApplyLayerNormFloat accuracy check failed for "
+                << bench.name << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
+void BenchmarkApplySigmoidFloat(std::mt19937* rng) {
+  const BatchVectorCase cases[] = {
+      {"sigmoidf_small", 4, 64},
+      {"sigmoidf_mid", 8, 256},
+      {"sigmoidf_large", 4, 1024},
+  };
+
+  std::cout << "## ApplySigmoidFloat<int16>\n\n";
+  std::cout << "- Affects: float-reference gate activation helper paths.\n\n";
+  PrintFloatHeader("Batch x input");
+
+  for (const BatchVectorCase& bench : cases) {
+    const int total = bench.batch * bench.size;
+    const int iterations = ChooseIterations(total * 8LL);
+    const std::vector<int16_t> input =
+        MakeRandomInt16Vector(total, rng, -32768, 32767);
+    std::vector<int16_t> scalar_output(total, 0);
+    std::vector<int16_t> rvv_output(total, 0);
+
+    PortableApplySigmoidFloat(input.data(), bench.batch, bench.size,
+                              scalar_output.data());
+    RvvApplySigmoidFloat(input.data(), bench.batch, bench.size,
+                         rvv_output.data());
+    std::vector<float> scalar_output_f(total, 0.0f);
+    std::vector<float> rvv_output_f(total, 0.0f);
+    std::transform(scalar_output.begin(), scalar_output.end(),
+                   scalar_output_f.begin(),
+                   [](int16_t value) { return static_cast<float>(value); });
+    std::transform(rvv_output.begin(), rvv_output.end(), rvv_output_f.begin(),
+                   [](int16_t value) { return static_cast<float>(value); });
+    const FloatAccuracy accuracy =
+        CompareFloatVectors(scalar_output_f, rvv_output_f);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, static_cast<double>(total), [&]() -> double {
+          PortableApplySigmoidFloat(input.data(), bench.batch, bench.size,
+                                    scalar_output.data());
+          return scalar_output.empty() ? 0.0 : scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, static_cast<double>(total), [&]() -> double {
+          RvvApplySigmoidFloat(input.data(), bench.batch, bench.size,
+                               rvv_output.data());
+          return rvv_output.empty() ? 0.0 : rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.batch << " x "
+              << bench.size << " | " << iterations << " | " << std::fixed
+              << std::setprecision(2) << scalar_stats.mean_us << " | "
+              << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << std::setprecision(8)
+              << accuracy.max_abs_diff << " | " << accuracy.max_rel_diff
+              << " | " << std::setprecision(10) << accuracy.mean_abs_diff
+              << " |\n";
+    if (accuracy.max_abs_diff > 8.0f || accuracy.mean_abs_diff > 3.0f) {
+      std::cerr << "ApplySigmoidFloat accuracy check failed for "
+                << bench.name << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
+struct FloatTanhCase {
+  const char* name;
+  int integer_bits;
+  int batch;
+  int size;
+};
+
+void BenchmarkApplyTanhFloat(std::mt19937* rng) {
+  const FloatTanhCase cases[] = {
+      {"tanhf_qm12_small", -12, 4, 64},
+      {"tanhf_qm12_mid", -12, 8, 256},
+      {"tanhf_qm15_large", -15, 4, 1024},
+  };
+
+  std::cout << "## ApplyTanhFloat<int16>\n\n";
+  std::cout << "- Affects: float-reference state activation helper paths.\n\n";
+  PrintIntHeader("Bits x batch x input");
+
+  for (const FloatTanhCase& bench : cases) {
+    const int total = bench.batch * bench.size;
+    const int iterations = ChooseIterations(total * 8LL);
+    const std::vector<int16_t> input =
+        MakeRandomInt16Vector(total, rng, -32768, 32767);
+    std::vector<int16_t> scalar_output(total, 0);
+    std::vector<int16_t> rvv_output(total, 0);
+
+    PortableApplyTanhFloat(input.data(), bench.batch, bench.size,
+                           bench.integer_bits, scalar_output.data());
+    RvvApplyTanhFloat(input.data(), bench.batch, bench.size,
+                      bench.integer_bits, rvv_output.data());
+    const IntAccuracy accuracy =
+        CompareIntegerVectors(scalar_output, rvv_output);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, static_cast<double>(total), [&]() -> double {
+          PortableApplyTanhFloat(input.data(), bench.batch, bench.size,
+                                 bench.integer_bits, scalar_output.data());
+          return scalar_output.empty() ? 0.0 : scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, static_cast<double>(total), [&]() -> double {
+          RvvApplyTanhFloat(input.data(), bench.batch, bench.size,
+                            bench.integer_bits, rvv_output.data());
+          return rvv_output.empty() ? 0.0 : rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.integer_bits << " x "
+              << bench.batch << " x " << bench.size << " | " << iterations
+              << " | " << std::fixed << std::setprecision(2)
+              << scalar_stats.mean_us << " | " << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << accuracy.max_abs_diff << " | "
+              << accuracy.mismatches << " |\n";
+    if (accuracy.mismatches != 0) {
+      std::cerr << "ApplyTanhFloat accuracy check failed for " << bench.name
+                << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
 void BenchmarkCwiseMulInt16(std::mt19937* rng) {
   const BatchVectorCase cases[] = {
       {"mul_q15_small", 4, 64},
@@ -2005,6 +2467,79 @@ void BenchmarkCwiseAdd(std::mt19937* rng) {
     if (accuracy.mismatches != 0) {
       std::cerr << "CwiseAdd accuracy check failed for " << bench.name
                 << "\n";
+      std::exit(1);
+    }
+  }
+
+  std::cout << "\n";
+}
+
+void BenchmarkTwoGateSaturatingAdd(std::mt19937* rng) {
+  const BatchVectorCase cases[] = {
+      {"two_gate_small", 4, 64},
+      {"two_gate_mid", 8, 256},
+      {"two_gate_large", 4, 1024},
+  };
+  constexpr int8_t kInputZp = 10;
+  constexpr int8_t kRecurrentZp = -5;
+  constexpr int32_t kInputMultiplier = 1347771520;
+  constexpr int32_t kInputShift = -7;
+  constexpr int32_t kRecurrentMultiplier = 1047577121;
+  constexpr int32_t kRecurrentShift = -6;
+
+  std::cout << "## TwoGateSaturatingAdd<int8 -> int16>\n\n";
+  std::cout << "- Affects: quantized LSTM gate merge helper paths.\n\n";
+  PrintIntHeader("Batch x cell");
+
+  for (const BatchVectorCase& bench : cases) {
+    const int total = bench.batch * bench.size;
+    const int iterations = ChooseIterations(static_cast<int64_t>(total) * 4);
+    const std::vector<int8_t> input =
+        MakeRandomInt8Vector(total, rng, -120, 120);
+    const std::vector<int8_t> recurrent =
+        MakeRandomInt8Vector(total, rng, -120, 120);
+    std::vector<int16_t> scalar_output(total, 0);
+    std::vector<int16_t> rvv_output(total, 0);
+
+    PortableTwoGateSaturatingAdd(
+        input.data(), kInputZp, recurrent.data(), kRecurrentZp,
+        kInputMultiplier, kInputShift, kRecurrentMultiplier, kRecurrentShift,
+        bench.batch, bench.size, scalar_output.data());
+    RvvTwoGateSaturatingAdd(
+        input.data(), kInputZp, recurrent.data(), kRecurrentZp,
+        kInputMultiplier, kInputShift, kRecurrentMultiplier, kRecurrentShift,
+        bench.batch, bench.size, rvv_output.data());
+    const IntAccuracy accuracy =
+        CompareIntegerVectors(scalar_output, rvv_output);
+
+    const BenchmarkStats scalar_stats =
+        RunBenchmark(iterations, 4.0 * total, [&]() -> double {
+          PortableTwoGateSaturatingAdd(
+              input.data(), kInputZp, recurrent.data(), kRecurrentZp,
+              kInputMultiplier, kInputShift, kRecurrentMultiplier,
+              kRecurrentShift, bench.batch, bench.size, scalar_output.data());
+          return scalar_output.empty() ? 0.0 : scalar_output[0];
+        });
+    const BenchmarkStats rvv_stats =
+        RunBenchmark(iterations, 4.0 * total, [&]() -> double {
+          RvvTwoGateSaturatingAdd(
+              input.data(), kInputZp, recurrent.data(), kRecurrentZp,
+              kInputMultiplier, kInputShift, kRecurrentMultiplier,
+              kRecurrentShift, bench.batch, bench.size, rvv_output.data());
+          return rvv_output.empty() ? 0.0 : rvv_output[0];
+        });
+
+    std::cout << "| " << bench.name << " | " << bench.batch << " x "
+              << bench.size << " | " << iterations << " | " << std::fixed
+              << std::setprecision(2) << scalar_stats.mean_us << " | "
+              << rvv_stats.mean_us << " | "
+              << (scalar_stats.mean_us / rvv_stats.mean_us) << " | "
+              << std::setprecision(3) << scalar_stats.gops << " | "
+              << rvv_stats.gops << " | " << accuracy.max_abs_diff << " | "
+              << accuracy.mismatches << " |\n";
+    if (accuracy.mismatches != 0) {
+      std::cerr << "TwoGateSaturatingAdd accuracy check failed for "
+                << bench.name << "\n";
       std::exit(1);
     }
   }
@@ -2499,14 +3034,18 @@ int Main() {
   BenchmarkIsZeroVectorFloat(&rng);
   BenchmarkIsZeroVectorInt8(&rng);
   BenchmarkFloatDotProduct(&rng);
+  BenchmarkBatchVectorDotProductInt16(&rng);
   BenchmarkFloatReduction(&rng);
   BenchmarkInt8Reduction(&rng);
+  BenchmarkInt32Reduction(&rng);
   BenchmarkMatrixScalarMultiply(&rng);
   BenchmarkFloatMatVec(&rng);
   BenchmarkInt8MatVec(&rng);
   BenchmarkInt8MatVecWithOffsets(&rng);
   BenchmarkGateMatVecInt16(&rng);
   BenchmarkGateMatVecInt8(&rng);
+  BenchmarkGateMatVecNoAccumulateInt8(&rng);
+  BenchmarkProjectionMatVecInt8(&rng);
   BenchmarkSparseFloat1x4(&rng);
   BenchmarkSparseFloatLedger(&rng);
   BenchmarkSparseInt8Ledger(&rng);
@@ -2516,9 +3055,13 @@ int Main() {
   BenchmarkApplyLayerNorm(&rng);
   BenchmarkApplySigmoid(&rng);
   BenchmarkApplyTanh(&rng);
+  BenchmarkApplyLayerNormFloat(&rng);
+  BenchmarkApplySigmoidFloat(&rng);
+  BenchmarkApplyTanhFloat(&rng);
   BenchmarkCwiseMulInt16(&rng);
   BenchmarkCwiseMulInt8(&rng);
   BenchmarkCwiseAdd(&rng);
+  BenchmarkTwoGateSaturatingAdd(&rng);
   BenchmarkCwiseClippingFloat(&rng);
   BenchmarkCwiseClippingInt16(&rng);
   BenchmarkCwiseClippingInt8(&rng);

@@ -75,6 +75,15 @@ vint32m4_t RvvRoundToNearestAwayFromZero(vfloat32m4_t values, size_t vl) {
   return __riscv_vfcvt_rtz_x_f_v_i32m4(adjusted, vl);
 }
 
+vint32m2_t RvvRoundToNearestAwayFromZero(vfloat32m2_t values, size_t vl) {
+  const vfloat32m2_t half = __riscv_vfmv_v_f_f32m2(0.5f, vl);
+  const vfloat32m2_t signed_half =
+      __riscv_vfsgnj_vv_f32m2(half, values, vl);
+  const vfloat32m2_t adjusted =
+      __riscv_vfadd_vv_f32m2(values, signed_half, vl);
+  return __riscv_vfcvt_rtz_x_f_v_i32m2(adjusted, vl);
+}
+
 void RvvQuantizeFloats(const float* values, int size, float scaling_factor_inv,
                        int32_t offset, int32_t clamp_min, int32_t clamp_max,
                        int8_t* quantized_values) {
@@ -259,6 +268,134 @@ int32_t RvvReduceSumInt16(const int16_t* data, int size) {
   }
 
   return sum;
+}
+
+int32_t RvvReduceSumInt32(const int32_t* data, int size) {
+  if (size <= 0) {
+    return 0;
+  }
+
+  const size_t vlmax = __riscv_vsetvlmax_e32m2();
+  const int step = static_cast<int>(vlmax);
+  vint32m2_t acc = __riscv_vmv_v_x_i32m2(0, vlmax);
+  int col = 0;
+  const int full_cols = size / step * step;
+  for (; col < full_cols; col += step) {
+    const vint32m2_t values32 = __riscv_vle32_v_i32m2(data + col, vlmax);
+    acc = __riscv_vadd_vv_i32m2(acc, values32, vlmax);
+  }
+
+  int32_t sum = HorizontalSum(acc, vlmax);
+  for (; col < size; ++col) {
+    sum += data[col];
+  }
+
+  return sum;
+}
+
+float RvvReduceSumSquareFloat(const float* data, int size) {
+  if (size <= 0) {
+    return 0.0f;
+  }
+
+  const size_t vlmax = __riscv_vsetvlmax_e32m1();
+  const int step = static_cast<int>(vlmax);
+  vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(0.0f, vlmax);
+  int col = 0;
+  const int full_cols = size / step * step;
+  for (; col < full_cols; col += step) {
+    const vfloat32m1_t values = __riscv_vle32_v_f32m1(data + col, vlmax);
+    const vfloat32m1_t squared = __riscv_vfmul_vv_f32m1(values, values, vlmax);
+    acc = __riscv_vfadd_vv_f32m1(acc, squared, vlmax);
+  }
+
+  float sum = HorizontalSum(acc, vlmax);
+  for (; col < size; ++col) {
+    sum += data[col] * data[col];
+  }
+
+  return sum;
+}
+
+int32_t RvvInt8DotProductOffset(const int8_t* lhs, int32_t lhs_offset,
+                                const int8_t* rhs, int size) {
+  if (size <= 0) {
+    return 0;
+  }
+
+  const size_t vlmax = __riscv_vsetvlmax_e8m1();
+  const int step = static_cast<int>(vlmax);
+  const int16_t offset16 = static_cast<int16_t>(lhs_offset);
+  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, vlmax);
+  int col = 0;
+  const int full_cols = size / step * step;
+  for (; col < full_cols; col += step) {
+    const vint8m1_t lhs8 = __riscv_vle8_v_i8m1(lhs + col, vlmax);
+    const vint8m1_t rhs8 = __riscv_vle8_v_i8m1(rhs + col, vlmax);
+    vint16m2_t lhs16 = __riscv_vwadd_vx_i16m2(lhs8, 0, vlmax);
+    lhs16 = __riscv_vsub_vx_i16m2(lhs16, offset16, vlmax);
+    const vint16m2_t rhs16 = __riscv_vwadd_vx_i16m2(rhs8, 0, vlmax);
+    const vint32m4_t prod32 = __riscv_vwmul_vv_i32m4(lhs16, rhs16, vlmax);
+    acc = __riscv_vadd_vv_i32m4(acc, prod32, vlmax);
+  }
+
+  int32_t dot = HorizontalSum(acc, vlmax);
+  for (; col < size; ++col) {
+    dot += (static_cast<int32_t>(lhs[col]) - lhs_offset) * rhs[col];
+  }
+
+  return dot;
+}
+
+int32_t RvvInt16DotProduct(const int16_t* lhs, const int16_t* rhs, int size) {
+  if (size <= 0) {
+    return 0;
+  }
+
+  const size_t vlmax = __riscv_vsetvlmax_e16m1();
+  const int step = static_cast<int>(vlmax);
+  vint32m2_t acc = __riscv_vmv_v_x_i32m2(0, vlmax);
+  int col = 0;
+  const int full_cols = size / step * step;
+  for (; col < full_cols; col += step) {
+    const vint16m1_t lhs16 = __riscv_vle16_v_i16m1(lhs + col, vlmax);
+    const vint16m1_t rhs16 = __riscv_vle16_v_i16m1(rhs + col, vlmax);
+    const vint32m2_t prod32 = __riscv_vwmul_vv_i32m2(lhs16, rhs16, vlmax);
+    acc = __riscv_vadd_vv_i32m2(acc, prod32, vlmax);
+  }
+
+  int32_t dot = HorizontalSum(acc, vlmax);
+  for (; col < size; ++col) {
+    dot += lhs[col] * rhs[col];
+  }
+
+  return dot;
+}
+
+int64_t RvvInt16Int8DotProduct(const int16_t* lhs, const int8_t* rhs,
+                               int size) {
+  if (size <= 0) {
+    return 0;
+  }
+
+  const size_t vlmax = __riscv_vsetvlmax_e8m1();
+  const int step = static_cast<int>(vlmax);
+  int64_t dot = 0;
+  int col = 0;
+  const int full_cols = size / step * step;
+  for (; col < full_cols; col += step) {
+    const vint16m2_t lhs16 = __riscv_vle16_v_i16m2(lhs + col, vlmax);
+    const vint8m1_t rhs8 = __riscv_vle8_v_i8m1(rhs + col, vlmax);
+    const vint16m2_t rhs16 = __riscv_vwadd_vx_i16m2(rhs8, 0, vlmax);
+    const vint32m4_t prod32 = __riscv_vwmul_vv_i32m4(lhs16, rhs16, vlmax);
+    dot += HorizontalSum(prod32, vlmax);
+  }
+
+  for (; col < size; ++col) {
+    dot += static_cast<int32_t>(lhs[col]) * static_cast<int32_t>(rhs[col]);
+  }
+
+  return dot;
 }
 
 vint32m2_t RvvRoundingDivideByPOT(vint32m2_t values, int exponent, size_t vl) {
@@ -897,6 +1034,57 @@ void RvvMatrixBatchVectorMultiplyAccumulate(
                                      n_batch * n_output, scratch, output);
 }
 
+void RvvMatrixBatchVectorMultiply(const int8_t* input, int32_t input_zeropoint,
+                                  const int8_t* input_to_gate_weights,
+                                  int32_t input_to_gate_effective_scale_a,
+                                  int32_t input_to_gate_effective_scale_b,
+                                  int32_t n_batch, int32_t n_input,
+                                  int32_t n_cell, int8_t* gate_output,
+                                  int8_t gate_output_zp) {
+  const int32_t int8_max = std::numeric_limits<int8_t>::max();
+  const int32_t int8_min = std::numeric_limits<int8_t>::min();
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const int8_t* input_ptr = input + batch * n_input;
+    for (int row = 0; row < n_cell; ++row) {
+      const int8_t* row_weights = input_to_gate_weights + row * n_input;
+      int32_t acc =
+          RvvInt8DotProductOffset(input_ptr, input_zeropoint, row_weights,
+                                  n_input);
+      acc = MultiplyByQuantizedMultiplier(acc,
+                                          input_to_gate_effective_scale_a,
+                                          input_to_gate_effective_scale_b);
+      acc += gate_output_zp;
+      acc = Clamp<int32_t>(acc, int8_min, int8_max);
+      gate_output[batch * n_cell + row] = static_cast<int8_t>(acc);
+    }
+  }
+}
+
+void RvvMatrixBatchVectorMultiply(const int16_t* hidden,
+                                  const int8_t* hidden_to_output_weights,
+                                  int32_t proj_effective_scale_a,
+                                  int32_t proj_effective_scale_b,
+                                  const int32_t* gate_bias, int32_t n_batch,
+                                  int32_t n_hidden, int32_t n_output,
+                                  int32_t output_zp, int8_t* proj_output) {
+  const int32_t int8_max = std::numeric_limits<int8_t>::max();
+  const int32_t int8_min = std::numeric_limits<int8_t>::min();
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const int16_t* hidden_ptr = hidden + batch * n_hidden;
+    for (int row = 0; row < n_output; ++row) {
+      int64_t acc = gate_bias != nullptr ? gate_bias[row] : 0;
+      acc += RvvInt16Int8DotProduct(hidden_ptr,
+                                    hidden_to_output_weights + row * n_hidden,
+                                    n_hidden);
+      int32_t scaled = MultiplyByQuantizedMultiplier(
+          acc, proj_effective_scale_a, proj_effective_scale_b);
+      scaled += output_zp;
+      scaled = Clamp<int32_t>(scaled, int8_min, int8_max);
+      proj_output[batch * n_output + row] = static_cast<int8_t>(scaled);
+    }
+  }
+}
+
 void RvvMatrixBatchVectorMultiplyAccumulate(
     const int8_t* matrix, int m_rows, int m_cols, const int8_t* vectors,
     const float* scaling_factors, int n_batch, float* result,
@@ -1211,6 +1399,69 @@ void RvvApplyLayerNorm(const int16_t* input, const int16_t* layer_norm_weights,
   }
 }
 
+void RvvApplyLayerNormFloat(const int16_t* input,
+                            const int16_t* layer_norm_weights,
+                            int32_t layer_norm_scale_a,
+                            int32_t layer_norm_scale_b, const int32_t* bias,
+                            int n_batch, int n_input, int16_t* output) {
+  const int32_t int16_max = std::numeric_limits<int16_t>::max();
+  const int32_t int16_min = std::numeric_limits<int16_t>::min();
+  static constexpr float kOutputScale = static_cast<float>(1 << 12);
+  const float layer_norm_scale =
+      layer_norm_scale_a *
+      std::pow(2.0, static_cast<double>(layer_norm_scale_b - 31));
+  const float bias_scale =
+      static_cast<float>(std::pow(2.0, -10)) * layer_norm_scale;
+
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const int base = batch * n_input;
+    float sum = 0.0f;
+    float sum_sq = 0.0f;
+    for (int i = 0; i < n_input; ++i) {
+      const float value = static_cast<float>(input[base + i]);
+      sum += value;
+      sum_sq += value * value;
+    }
+
+    const float mean = sum / n_input;
+    const float variance = sum_sq / n_input - mean * mean;
+    const float stddev_inv =
+        variance == 0.0f ? 1.0f / std::sqrt(1e-8f) : 1.0f / std::sqrt(variance);
+
+    int col = 0;
+    while (col < n_input) {
+      const size_t vl = __riscv_vsetvl_e16m1(n_input - col);
+      const vint16m1_t input16 = __riscv_vle16_v_i16m1(input + base + col, vl);
+      const vint16m1_t weights16 =
+          __riscv_vle16_v_i16m1(layer_norm_weights + col, vl);
+      const vint32m2_t input32 = __riscv_vwadd_vx_i32m2(input16, 0, vl);
+      const vint32m2_t weights32 = __riscv_vwadd_vx_i32m2(weights16, 0, vl);
+      vfloat32m2_t normalized =
+          __riscv_vfcvt_f_x_v_f32m2(input32, vl);
+      normalized = __riscv_vfsub_vf_f32m2(normalized, mean, vl);
+      normalized = __riscv_vfmul_vf_f32m2(normalized, stddev_inv, vl);
+      vfloat32m2_t weighted = __riscv_vfcvt_f_x_v_f32m2(weights32, vl);
+      weighted = __riscv_vfmul_vf_f32m2(weighted, layer_norm_scale, vl);
+      weighted = __riscv_vfmul_vv_f32m2(normalized, weighted, vl);
+      if (bias != nullptr) {
+        const vint32m2_t bias32 = __riscv_vle32_v_i32m2(bias + col, vl);
+        const vfloat32m2_t biasf = __riscv_vfcvt_f_x_v_f32m2(bias32, vl);
+        const vfloat32m2_t bias_scaled =
+            __riscv_vfmul_vf_f32m2(biasf, bias_scale, vl);
+        weighted = __riscv_vfadd_vv_f32m2(weighted, bias_scaled, vl);
+      }
+      weighted = __riscv_vfmul_vf_f32m2(weighted, kOutputScale, vl);
+      vint32m2_t quantized = RvvRoundToNearestAwayFromZero(weighted, vl);
+      quantized = __riscv_vmax_vx_i32m2(quantized, int16_min, vl);
+      quantized = __riscv_vmin_vx_i32m2(quantized, int16_max, vl);
+      const vint16m1_t output16 =
+          __riscv_vnclip_wx_i16m1(quantized, 0, __RISCV_VXRM_RDN, vl);
+      __riscv_vse16_v_i16m1(output + base + col, output16, vl);
+      col += static_cast<int>(vl);
+    }
+  }
+}
+
 void RvvApplySigmoid(const int16_t* input, int32_t n_batch, int32_t n_input,
                      int16_t* output) {
   for (int batch = 0; batch < n_batch; ++batch) {
@@ -1224,6 +1475,12 @@ void RvvApplySigmoid(const int16_t* input, int32_t n_batch, int32_t n_input,
       col += static_cast<int>(vl);
     }
   }
+}
+
+void RvvApplySigmoidFloat(const int16_t* input, int32_t n_batch,
+                          int32_t n_input, int16_t* output) {
+  // Reuse the Q3.12 fixed-point logistic kernel instead of the scalar exp path.
+  RvvApplySigmoid(input, n_batch, n_input, output);
 }
 
 void RvvApplyTanh(int32_t integer_bits, const int16_t* input, int32_t n_batch,
@@ -1256,6 +1513,43 @@ void RvvApplyTanh(int32_t integer_bits, const int16_t* input, int32_t n_batch,
       return;
   }
 #undef DISPATCH_RVV_TANH
+}
+
+void RvvApplyTanhFloat(const int16_t* input, int32_t n_batch, int32_t n_input,
+                       int32_t integer_bits, int16_t* output) {
+  const int32_t int16_max = std::numeric_limits<int16_t>::max();
+  const int32_t int16_min = std::numeric_limits<int16_t>::min();
+  const float input_scale =
+      static_cast<float>(std::pow(2.0, static_cast<double>(integer_bits)));
+  static constexpr float kOutputScale = static_cast<float>(1 << 15);
+  std::array<float, kMaxRvvInt16Lanes> temp_input;
+  std::array<float, kMaxRvvInt16Lanes> temp_output;
+
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const int base = batch * n_input;
+    int col = 0;
+    while (col < n_input) {
+      const size_t vl = __riscv_vsetvl_e16m1(n_input - col);
+      const vint16m1_t input16 = __riscv_vle16_v_i16m1(input + base + col, vl);
+      const vint32m2_t input32 = __riscv_vwadd_vx_i32m2(input16, 0, vl);
+      vfloat32m2_t inputf = __riscv_vfcvt_f_x_v_f32m2(input32, vl);
+      inputf = __riscv_vfmul_vf_f32m2(inputf, input_scale, vl);
+      __riscv_vse32_v_f32m2(temp_input.data(), inputf, vl);
+
+      for (size_t i = 0; i < vl; ++i) {
+        temp_output[i] = std::tanh(temp_input[i]) * kOutputScale;
+      }
+
+      vfloat32m2_t outputf = __riscv_vle32_v_f32m2(temp_output.data(), vl);
+      vint32m2_t quantized = __riscv_vfcvt_rtz_x_f_v_i32m2(outputf, vl);
+      quantized = __riscv_vmax_vx_i32m2(quantized, int16_min, vl);
+      quantized = __riscv_vmin_vx_i32m2(quantized, int16_max, vl);
+      const vint16m1_t output16 =
+          __riscv_vnclip_wx_i16m1(quantized, 0, __RISCV_VXRM_RDN, vl);
+      __riscv_vse16_v_i16m1(output + base + col, output16, vl);
+      col += static_cast<int>(vl);
+    }
+  }
 }
 
 void RvvCwiseMul(const int16_t* input_1, const int16_t* input_2, int n_batch,
@@ -1442,6 +1736,16 @@ void RvvVectorBatchVectorCwiseProductAccumulate(const int16_t* vector,
   }
 }
 
+void RvvBatchVectorBatchVectorDotProduct(const int16_t* vector1,
+                                         const int16_t* vector2, int v_size,
+                                         int n_batch, int32_t* result) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    result[batch] = RvvInt16DotProduct(vector1, vector2, v_size);
+    vector1 += v_size;
+    vector2 += v_size;
+  }
+}
+
 void RvvSub1Vector(const float* vector, int v_size, float* result) {
   if (v_size <= 0) {
     return;
@@ -1506,6 +1810,15 @@ void RvvReductionSumVector(const float* input_vector, float* output_vector,
   }
 }
 
+void RvvReductionSumVector(const int32_t* input_vector, int32_t* output_vector,
+                           int output_size, int reduction_size) {
+  for (int output_index = 0; output_index < output_size; ++output_index) {
+    output_vector[output_index] =
+        RvvReduceSumInt32(input_vector, reduction_size);
+    input_vector += reduction_size;
+  }
+}
+
 void RvvReductionSumVector(const int8_t* input_vector, int32_t* output_vector,
                            int output_size, int reduction_size) {
   for (int output_index = 0; output_index < output_size; ++output_index) {
@@ -1555,6 +1868,44 @@ void RvvMeanStddevNormalization(const float* input_vector, float* output_vector,
 
     input_vector += v_size;
     output_vector += v_size;
+  }
+}
+
+void RvvTwoGateSaturatingAdd(const int8_t* input, int8_t input_zp,
+                             const int8_t* recurrent, int8_t recurrent_zp,
+                             int32_t input_effective_scale_a,
+                             int32_t input_effective_scale_b,
+                             int32_t recurrent_effective_scale_a,
+                             int32_t recurrent_effective_scale_b,
+                             int32_t n_batch, int32_t n_cell,
+                             int16_t* output) {
+  const int total = n_batch * n_cell;
+  int col = 0;
+  while (col < total) {
+    const size_t vl = __riscv_vsetvl_e8mf2(total - col);
+    const vint8mf2_t input8 = __riscv_vle8_v_i8mf2(input + col, vl);
+    const vint8mf2_t recurrent8 = __riscv_vle8_v_i8mf2(recurrent + col, vl);
+    vint16m1_t input16 = __riscv_vwadd_vx_i16m1(input8, 0, vl);
+    vint16m1_t recurrent16 = __riscv_vwadd_vx_i16m1(recurrent8, 0, vl);
+    input16 = __riscv_vsub_vx_i16m1(input16, input_zp, vl);
+    recurrent16 = __riscv_vsub_vx_i16m1(recurrent16, recurrent_zp, vl);
+
+    vint32m2_t input32 = __riscv_vwadd_vx_i32m2(input16, 0, vl);
+    vint32m2_t recurrent32 = __riscv_vwadd_vx_i32m2(recurrent16, 0, vl);
+    input32 = RvvMultiplyByQuantizedMultiplier(
+        input32, input_effective_scale_a, input_effective_scale_b, vl);
+    recurrent32 = RvvMultiplyByQuantizedMultiplier(
+        recurrent32, recurrent_effective_scale_a,
+        recurrent_effective_scale_b, vl);
+    vint32m2_t summed = __riscv_vadd_vv_i32m2(input32, recurrent32, vl);
+    summed = __riscv_vmax_vx_i32m2(
+        summed, std::numeric_limits<int16_t>::min(), vl);
+    summed = __riscv_vmin_vx_i32m2(
+        summed, std::numeric_limits<int16_t>::max(), vl);
+    const vint16m1_t output16 =
+        __riscv_vnclip_wx_i16m1(summed, 0, __RISCV_VXRM_RDN, vl);
+    __riscv_vse16_v_i16m1(output + col, output16, vl);
+    col += static_cast<int>(vl);
   }
 }
 
