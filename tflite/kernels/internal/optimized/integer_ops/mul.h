@@ -121,6 +121,28 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
     vst1q_s8(output_data + i, clamped);
   }
 #endif  // NEON
+#ifdef USE_RVV
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8mf2(size - i);
+    vint16m1_t input1_val =
+        optimized_ops::RvvLoadInt8AsInt16(input1_data + i, vl);
+    vint16m1_t input2_val =
+        optimized_ops::RvvLoadInt8AsInt16(input2_data + i, vl);
+    input1_val = __riscv_vadd_vx_i16m1(input1_val, params.input1_offset, vl);
+    input2_val = __riscv_vadd_vx_i16m1(input2_val, params.input2_offset, vl);
+    vint32m2_t product = __riscv_vwmul_vv_i32m2(input1_val, input2_val, vl);
+    product = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        product, params.output_multiplier, params.output_shift, vl);
+    product = __riscv_vadd_vx_i32m2(product, params.output_offset, vl);
+    product =
+        __riscv_vmax_vx_i32m2(product, params.quantized_activation_min, vl);
+    product =
+        __riscv_vmin_vx_i32m2(product, params.quantized_activation_max, vl);
+    optimized_ops::RvvStoreInt8FromInt32(product, output_data + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   for (; i < size; ++i) {
     const int32 input1_val = params.input1_offset + input1_data[i];
@@ -214,6 +236,26 @@ inline void MulSimpleBroadcast(int size, const ArithmeticParams& params,
     vst1q_s8(output_data + i, clamped);
   }
 #endif  // NEON
+#ifdef USE_RVV
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8mf2(size - i);
+    vint16m1_t input2_val =
+        optimized_ops::RvvLoadInt8AsInt16(input2_data + i, vl);
+    input2_val = __riscv_vadd_vx_i16m1(input2_val, params.input2_offset, vl);
+    const vint16m1_t input1_vec = __riscv_vmv_v_x_i16m1(input1_val, vl);
+    vint32m2_t product = __riscv_vwmul_vv_i32m2(input1_vec, input2_val, vl);
+    product = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        product, params.output_multiplier, params.output_shift, vl);
+    product = __riscv_vadd_vx_i32m2(product, params.output_offset, vl);
+    product =
+        __riscv_vmax_vx_i32m2(product, params.quantized_activation_min, vl);
+    product =
+        __riscv_vmin_vx_i32m2(product, params.quantized_activation_max, vl);
+    optimized_ops::RvvStoreInt8FromInt32(product, output_data + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   for (; i < size; ++i) {
     const int32 input2_val = params.input2_offset + input2_data[i];

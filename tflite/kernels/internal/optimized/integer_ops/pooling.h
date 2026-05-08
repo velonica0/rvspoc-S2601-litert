@@ -18,6 +18,7 @@ limitations under the License.
 #include <string.h>
 
 #include <algorithm>
+#include <limits>
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/internal/compatibility.h"
@@ -25,6 +26,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/cpu_check.h"
 #include "tflite/kernels/internal/optimized/im2col_utils.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/strided_slice_logic.h"
@@ -33,6 +35,75 @@ limitations under the License.
 
 namespace tflite {
 namespace optimized_integer_ops {
+
+#ifdef USE_RVV
+inline vint16m1_t RvvLoadInt8AsInt16ForPooling(const int8_t* data, size_t vl) {
+  return __riscv_vwadd_vx_i16m1(__riscv_vle8_v_i8mf2(data, vl), 0, vl);
+}
+
+inline void RvvStoreInt8FromInt32ForPooling(vint32m2_t values, int8_t* data,
+                                            size_t vl) {
+  const vint16m1_t narrowed16 = __riscv_vnsra_wx_i16m1(values, 0, vl);
+  const vint8mf2_t narrowed8 = __riscv_vnsra_wx_i8mf2(narrowed16, 0, vl);
+  __riscv_vse8_v_i8mf2(data, narrowed8, vl);
+}
+
+inline vuint8m1_t RvvLoadBiasedInt8AsUInt8ForPooling(const int8_t* data,
+                                                     size_t vl) {
+  const vint8m1_t values = __riscv_vle8_v_i8m1(data, vl);
+  const vuint8m1_t bits = __riscv_vreinterpret_v_i8m1_u8m1(values);
+  return __riscv_vxor_vx_u8m1(bits, 0x80, vl);
+}
+
+inline void RvvStoreBiasedUInt8AsInt8ForPooling(vuint8m1_t values, int8_t* data,
+                                                size_t vl) {
+  const vuint8m1_t unbiased = __riscv_vxor_vx_u8m1(values, 0x80, vl);
+  __riscv_vse8_v_i8m1(data, __riscv_vreinterpret_v_u8m1_i8m1(unbiased), vl);
+}
+
+inline vint32m2_t RvvAverageRoundAwayFromZeroForPooling(vint32m2_t values,
+                                                        int filter_count,
+                                                        size_t vl) {
+  const vbool16_t negative = __riscv_vmslt_vx_i32m2_b16(values, 0, vl);
+  const vint32m2_t negated = __riscv_vneg_v_i32m2(values, vl);
+  const vint32m2_t abs_values =
+      __riscv_vmerge_vvm_i32m2(values, negated, negative, vl);
+  const vuint32m2_t abs_values_u32 =
+      __riscv_vreinterpret_v_i32m2_u32m2(abs_values);
+  vuint32m2_t rounded_abs_u32;
+  if (filter_count == 4) {
+    rounded_abs_u32 = __riscv_vsrl_vx_u32m2(
+        __riscv_vadd_vx_u32m2(abs_values_u32, 2, vl), 2, vl);
+  } else if (filter_count == 9) {
+    rounded_abs_u32 = __riscv_vsrl_vx_u32m2(
+        __riscv_vadd_vx_u32m2(
+            __riscv_vmul_vx_u32m2(abs_values_u32, 7282u, vl), 1u << 15, vl),
+        16, vl);
+  } else if (filter_count == 15) {
+    rounded_abs_u32 = __riscv_vsrl_vx_u32m2(
+        __riscv_vadd_vx_u32m2(
+            __riscv_vmul_vx_u32m2(abs_values_u32, 4369u, vl), 1u << 15, vl),
+        16, vl);
+  } else {
+    const vuint32m2_t quotient =
+        __riscv_vdivu_vx_u32m2(abs_values_u32, filter_count, vl);
+    const vuint32m2_t remainder =
+        __riscv_vremu_vx_u32m2(abs_values_u32, filter_count, vl);
+    const vuint32m2_t doubled_remainder =
+        __riscv_vsll_vx_u32m2(remainder, 1, vl);
+    const vbool16_t increment_mask =
+        __riscv_vmsgeu_vx_u32m2_b16(doubled_remainder, filter_count, vl);
+    const vuint32m2_t increment = __riscv_vmerge_vxm_u32m2(
+        __riscv_vmv_v_x_u32m2(0, vl), 1, increment_mask, vl);
+    rounded_abs_u32 = __riscv_vadd_vv_u32m2(quotient, increment, vl);
+  }
+  const vint32m2_t rounded_abs =
+      __riscv_vreinterpret_v_u32m2_i32m2(rounded_abs_u32);
+  const vint32m2_t negative_rounded_abs = __riscv_vneg_v_i32m2(rounded_abs, vl);
+  return __riscv_vmerge_vvm_i32m2(rounded_abs, negative_rounded_abs, negative,
+                                  vl);
+}
+#endif
 
 inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                     const int8_t* input_data, const RuntimeShape& output_shape,
@@ -80,8 +151,14 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
           const int filter_y_start = std::max(0, -in_y_origin);
           const int filter_y_end =
               std::min(params.filter_height, input_height - in_y_origin);
+#ifdef USE_RVV
+          // Keep RVV max reduction on biased u8 values so we can reuse the
+          // faster unsigned compare path for signed int8 ordering.
+          memset(acc, 0, tranche_depth * sizeof(acc[0]));
+#else
           memset(acc, params.quantized_activation_min,
                  tranche_depth * sizeof(acc[0]));
+#endif
           const int8_t* input_ptr =
               input_data + depth_base +
               depth * (in_x_origin +
@@ -109,6 +186,21 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                 vst1_s8(acc + channel, acc_reg);
               }
 #endif
+#ifdef USE_RVV
+              for (; channel < tranche_depth;) {
+                const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+                vuint8m1_t acc_reg =
+                    __riscv_vle8_v_u8m1(reinterpret_cast<uint8_t*>(acc) + channel,
+                                        vl);
+                const vuint8m1_t input_reg =
+                    RvvLoadBiasedInt8AsUInt8ForPooling(input_channel_ptr, vl);
+                acc_reg = __riscv_vmaxu_vv_u8m1(acc_reg, input_reg, vl);
+                __riscv_vse8_v_u8m1(reinterpret_cast<uint8_t*>(acc) + channel,
+                                    acc_reg, vl);
+                input_channel_ptr += vl;
+                channel += static_cast<int>(vl);
+              }
+#endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] = std::max(acc[channel], *input_channel_ptr++);
               }
@@ -130,6 +222,37 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             a = vmin_s8(a, vdup_n_s8(params.quantized_activation_max));
             a = vmax_s8(a, vdup_n_s8(params.quantized_activation_min));
             vst1_s8(output_ptr + channel, a);
+          }
+#endif
+#ifdef USE_RVV
+          const bool full_int8_range =
+              params.quantized_activation_min ==
+                  std::numeric_limits<int8_t>::min() &&
+              params.quantized_activation_max ==
+                  std::numeric_limits<int8_t>::max();
+          if (full_int8_range) {
+            for (; channel < tranche_depth;) {
+              const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+              const vuint8m1_t values = __riscv_vle8_v_u8m1(
+                  reinterpret_cast<uint8_t*>(acc) + channel, vl);
+              RvvStoreBiasedUInt8AsInt8ForPooling(values, output_ptr + channel,
+                                                  vl);
+              channel += static_cast<int>(vl);
+            }
+          } else {
+            for (; channel < tranche_depth;) {
+              const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+              const vuint8m1_t biased_values = __riscv_vle8_v_u8m1(
+                  reinterpret_cast<uint8_t*>(acc) + channel, vl);
+              vint8m1_t values = __riscv_vreinterpret_v_u8m1_i8m1(
+                  __riscv_vxor_vx_u8m1(biased_values, 0x80, vl));
+              values = __riscv_vmin_vx_i8m1(values,
+                                            params.quantized_activation_max, vl);
+              values = __riscv_vmax_vx_i8m1(values,
+                                            params.quantized_activation_min, vl);
+              __riscv_vse8_v_i8m1(output_ptr + channel, values, vl);
+              channel += static_cast<int>(vl);
+            }
           }
 #endif
           for (; channel < tranche_depth; ++channel) {
@@ -233,6 +356,22 @@ inline bool AveragePool(const PoolParams& params,
                 }
               }
 #endif
+#ifdef USE_RVV
+              for (; channel < tranche_depth;) {
+                const size_t vl = __riscv_vsetvl_e16m1(tranche_depth - channel);
+                const vint16m1_t input_values =
+                    RvvLoadInt8AsInt16ForPooling(input_channel_ptr, vl);
+                vint32m2_t acc_values = __riscv_vle32_v_i32m2(acc + channel, vl);
+                acc_values =
+                    __riscv_vadd_vv_i32m2(acc_values,
+                                          __riscv_vwadd_vx_i32m2(input_values, 0,
+                                                                 vl),
+                                          vl);
+                __riscv_vse32_v_i32m2(acc + channel, acc_values, vl);
+                input_channel_ptr += vl;
+                channel += static_cast<int>(vl);
+              }
+#endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] += *input_channel_ptr++;
               }
@@ -255,6 +394,21 @@ inline bool AveragePool(const PoolParams& params,
             buf8 = vmin_s8(buf8, vdup_n_s8(params.quantized_activation_max));
             buf8 = vmax_s8(buf8, vdup_n_s8(params.quantized_activation_min));
             vst1_s8(output_ptr + channel, buf8);
+          }
+#endif
+#ifdef USE_RVV
+          for (; channel < tranche_depth;) {
+            const size_t vl = __riscv_vsetvl_e32m2(tranche_depth - channel);
+            vint32m2_t averaged = RvvAverageRoundAwayFromZeroForPooling(
+                __riscv_vle32_v_i32m2(acc + channel, vl), filter_count, vl);
+            averaged = __riscv_vmax_vx_i32m2(averaged,
+                                             params.quantized_activation_min,
+                                             vl);
+            averaged = __riscv_vmin_vx_i32m2(averaged,
+                                             params.quantized_activation_max,
+                                             vl);
+            RvvStoreInt8FromInt32ForPooling(averaged, output_ptr + channel, vl);
+            channel += static_cast<int>(vl);
           }
 #endif
           for (; channel < tranche_depth; ++channel) {

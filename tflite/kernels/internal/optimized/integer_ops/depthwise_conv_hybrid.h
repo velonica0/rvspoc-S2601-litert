@@ -131,6 +131,34 @@ static void DoDepthwiseConvHybridGeneral(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
 #endif  // USE_NEON
+#ifdef USE_RVV
+  // Keep RVV kernel selection aligned with the NEON dispatch table. The
+  // kernels below resolve to the RVV implementations in depthwise_conv.h.
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 12, 1)
+
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 16, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 16)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 20)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 32)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 4, 1)
+
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
+#endif
 
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {
@@ -236,6 +264,29 @@ static void DoDepthwiseConvHybridGeneral(
             }
           }
 #endif  // USE_NEON
+#ifdef USE_RVV
+          for (; c < target_output_depth;) {
+            const size_t vl = __riscv_vsetvl_e32m2(target_output_depth - c);
+            const vfloat32m2_t channel_scale =
+                __riscv_vle32_v_f32m2(per_channel_scales + c, vl);
+            const vfloat32m2_t bias_vec =
+                __riscv_vle32_v_f32m2(bias_data + c, vl);
+            for (int n = 0; n < num_output_pixels; ++n) {
+              const int loc = n * output_depth + c;
+              const vint32m2_t acc = __riscv_vle32_v_i32m2(acc_buffer + loc, vl);
+              vfloat32m2_t float_acc = __riscv_vfcvt_f_x_v_f32m2(acc, vl);
+              float_acc = __riscv_vfmul_vv_f32m2(float_acc, channel_scale, vl);
+              float_acc = __riscv_vfmul_vf_f32m2(float_acc, input_scale, vl);
+              float_acc = __riscv_vfadd_vv_f32m2(float_acc, bias_vec, vl);
+              float_acc =
+                  __riscv_vfmax_vf_f32m2(float_acc, output_activation_min, vl);
+              float_acc =
+                  __riscv_vfmin_vf_f32m2(float_acc, output_activation_max, vl);
+              __riscv_vse32_v_f32m2(output_ptr + loc, float_acc, vl);
+            }
+            c += static_cast<int>(vl);
+          }
+#endif
 
           for (; c < target_output_depth; c++) {
             for (int n = 0; n < num_output_pixels; ++n) {

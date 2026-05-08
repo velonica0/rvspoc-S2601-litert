@@ -16,6 +16,7 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_MEAN_H_
 
 #include <algorithm>
+#include <limits>
 
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_threadpool.h"
@@ -124,6 +125,33 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
       vst1q_s8(output_data_ptr, combined_output);
     }
 #endif  // USE_NEON
+#ifdef USE_RVV
+    for (; out_d < end_depth;) {
+      const size_t vl = __riscv_vsetvl_e8mf2(end_depth - out_d);
+      vint32m2_t temp_sum = __riscv_vmv_v_x_i32m2(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const int8_t* input_data_ptr =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          const vint16m1_t input_data_val =
+              optimized_ops::RvvLoadInt8AsInt16(input_data_ptr, vl);
+          temp_sum = __riscv_vadd_vv_i32m2(
+              temp_sum, __riscv_vwadd_vx_i32m2(input_data_val, 0, vl), vl);
+        }
+      }
+
+      temp_sum = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+          temp_sum, multiplier, shift, vl);
+      temp_sum = __riscv_vadd_vx_i32m2(temp_sum, bias, vl);
+      temp_sum = __riscv_vmax_vx_i32m2(temp_sum, kMinValue, vl);
+      temp_sum = __riscv_vmin_vx_i32m2(temp_sum, kMaxValue, vl);
+
+      int8_t* output_data_ptr =
+          output_data + Offset(output_shape, out_b, 0, 0, out_d);
+      optimized_ops::RvvStoreInt8FromInt32(temp_sum, output_data_ptr, vl);
+      out_d += static_cast<int>(vl);
+    }
+#endif
 
     for (; out_d < end_depth; ++out_d) {
       int acc = 0;

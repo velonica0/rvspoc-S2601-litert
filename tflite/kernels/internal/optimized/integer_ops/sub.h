@@ -21,6 +21,7 @@ limitations under the License.
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/compatibility.h"
 #include "tflite/kernels/internal/optimized/avx2_quantization_utils.h"
+#include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -97,6 +98,37 @@ inline void SubElementwiseInt16(int size, const ArithmeticParams& params,
     avx2_utils::CastInt32ToInt16AndStore(output_data + i + 8, s2);
   }
 #endif  // __AVX2__
+
+#ifdef USE_RVV
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e16m1(size - i);
+    const vint16m1_t input1_val_original =
+        __riscv_vle16_v_i16m1(input1_data + i, vl);
+    const vint16m1_t input2_val_original =
+        __riscv_vle16_v_i16m1(input2_data + i, vl);
+    vint32m2_t s11 = __riscv_vwadd_vx_i32m2(input1_val_original, 0, vl);
+    vint32m2_t s21 = __riscv_vwadd_vx_i32m2(input2_val_original, 0, vl);
+    s11 = __riscv_vadd_vx_i32m2(s11, params.input1_offset, vl);
+    s21 = __riscv_vadd_vx_i32m2(s21, params.input2_offset, vl);
+    if (params.left_shift > 0) {
+      s11 = __riscv_vsll_vx_i32m2(s11, params.left_shift, vl);
+      s21 = __riscv_vsll_vx_i32m2(s21, params.left_shift, vl);
+    }
+    s11 = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        s11, params.input1_multiplier, params.input1_shift, vl);
+    s21 = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        s21, params.input2_multiplier, params.input2_shift, vl);
+    vint32m2_t diff = __riscv_vsub_vv_i32m2(s11, s21, vl);
+    diff = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        diff, params.output_multiplier, params.output_shift, vl);
+    diff = __riscv_vadd_vx_i32m2(diff, params.output_offset, vl);
+    diff = __riscv_vmin_vx_i32m2(diff, params.quantized_activation_max, vl);
+    diff = __riscv_vmax_vx_i32m2(diff, params.quantized_activation_min, vl);
+    optimized_ops::RvvStoreInt16FromInt32(diff, output_data + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   for (; i < size; ++i) {
     const int32_t input1_val = params.input1_offset + input1_data[i];

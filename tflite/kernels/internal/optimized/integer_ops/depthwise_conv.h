@@ -40,7 +40,379 @@ namespace depthwise_conv {
 // Implementation of quantized DepthwiseConv
 
 template <bool kAllowStrided, int kFixedInputDepth, int kFixedDepthMultiplier>
-struct QuantizedDepthwiseConvKernel {};
+struct QuantizedDepthwiseConvKernel {
+#ifdef USE_RVV
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    const int actual_input_depth =
+        kFixedInputDepth ? kFixedInputDepth : input_depth;
+    const int actual_depth_multiplier =
+        kFixedDepthMultiplier ? kFixedDepthMultiplier : depth_multiplier;
+
+    if (kFixedInputDepth) {
+      TFLITE_DCHECK_EQ(input_depth, kFixedInputDepth);
+    }
+    if (kFixedDepthMultiplier) {
+      TFLITE_DCHECK_EQ(depth_multiplier, kFixedDepthMultiplier);
+    }
+
+    for (int outp = 0; outp < num_output_pixels; ++outp) {
+      const int8_t* local_filter_ptr = filter_ptr;
+      const int8_t* local_input_ptr = input_ptr;
+      int32_t* local_acc_ptr = acc_buffer_ptr;
+
+      if (actual_depth_multiplier == 1) {
+        int channel = 0;
+        for (; channel < actual_input_depth;) {
+          const size_t vl = __riscv_vsetvl_e8mf2(actual_input_depth - channel);
+          vint16m1_t input_val = optimized_ops::RvvLoadInt8AsInt16(
+              local_input_ptr + channel, vl);
+          const vint16m1_t filter_val = optimized_ops::RvvLoadInt8AsInt16(
+              local_filter_ptr + channel, vl);
+          input_val = __riscv_vadd_vx_i16m1(input_val, input_offset, vl);
+          vint32m2_t acc = __riscv_vle32_v_i32m2(local_acc_ptr + channel, vl);
+          const vint32m2_t product =
+              __riscv_vwmul_vv_i32m2(filter_val, input_val, vl);
+          acc = __riscv_vadd_vv_i32m2(acc, product, vl);
+          __riscv_vse32_v_i32m2(local_acc_ptr + channel, acc, vl);
+          channel += static_cast<int>(vl);
+        }
+      } else {
+        for (int ic = 0; ic < actual_input_depth; ++ic) {
+          const int16_t input_val = *local_input_ptr++ + input_offset;
+          int m = 0;
+          for (; m < actual_depth_multiplier;) {
+            const size_t vl =
+                __riscv_vsetvl_e8mf2(actual_depth_multiplier - m);
+            const vint16m1_t filter_val = optimized_ops::RvvLoadInt8AsInt16(
+                local_filter_ptr + m, vl);
+            vint32m2_t acc = __riscv_vle32_v_i32m2(local_acc_ptr + m, vl);
+            const vint16m1_t input_vec = __riscv_vmv_v_x_i16m1(input_val, vl);
+            const vint32m2_t product =
+                __riscv_vwmul_vv_i32m2(filter_val, input_vec, vl);
+            acc = __riscv_vadd_vv_i32m2(acc, product, vl);
+            __riscv_vse32_v_i32m2(local_acc_ptr + m, acc, vl);
+            m += static_cast<int>(vl);
+          }
+          local_filter_ptr += actual_depth_multiplier;
+          local_acc_ptr += actual_depth_multiplier;
+        }
+      }
+
+      input_ptr += input_ptr_increment;
+      acc_buffer_ptr += actual_input_depth * actual_depth_multiplier;
+    }
+  }
+#endif
+};
+
+#ifdef USE_RVV
+template <int kInputDepth>
+inline void RvvDepthwiseConvKernelDm1Single(
+    int num_output_pixels, const int8_t* input_ptr, int16_t input_offset,
+    int input_ptr_increment, const int8_t* filter_ptr,
+    int32_t* acc_buffer_ptr) {
+  for (int outp = 0; outp < num_output_pixels; ++outp) {
+    int channel = 0;
+    for (; channel < kInputDepth;) {
+      const size_t vl = __riscv_vsetvl_e8mf2(kInputDepth - channel);
+      vint16m1_t input_val =
+          optimized_ops::RvvLoadInt8AsInt16(input_ptr + channel, vl);
+      const vint16m1_t filter_val =
+          optimized_ops::RvvLoadInt8AsInt16(filter_ptr + channel, vl);
+      input_val = __riscv_vadd_vx_i16m1(input_val, input_offset, vl);
+      vint32m2_t acc = __riscv_vle32_v_i32m2(acc_buffer_ptr + channel, vl);
+      const vint32m2_t product =
+          __riscv_vwmul_vv_i32m2(filter_val, input_val, vl);
+      acc = __riscv_vadd_vv_i32m2(acc, product, vl);
+      __riscv_vse32_v_i32m2(acc_buffer_ptr + channel, acc, vl);
+      channel += static_cast<int>(vl);
+    }
+    input_ptr += input_ptr_increment;
+    acc_buffer_ptr += kInputDepth;
+  }
+}
+
+template <int kInputDepth>
+inline void RvvDepthwiseConvKernelDm1Stride1(
+    int num_output_pixels, const int8_t* input_ptr, int16_t input_offset,
+    int input_ptr_increment, const int8_t* filter_ptr,
+    int32_t* acc_buffer_ptr) {
+  TFLITE_DCHECK_EQ(input_ptr_increment, kInputDepth);
+  constexpr int kOutputDepth = kInputDepth;
+  int outp = 0;
+  for (; outp <= num_output_pixels - 2; outp += 2) {
+    int channel = 0;
+    for (; channel < kInputDepth;) {
+      const size_t vl = __riscv_vsetvl_e8mf2(kInputDepth - channel);
+      const vint16m1_t filter_val =
+          optimized_ops::RvvLoadInt8AsInt16(filter_ptr + channel, vl);
+      vint16m1_t input0 =
+          optimized_ops::RvvLoadInt8AsInt16(input_ptr + channel, vl);
+      vint16m1_t input1 = optimized_ops::RvvLoadInt8AsInt16(
+          input_ptr + input_ptr_increment + channel, vl);
+      input0 = __riscv_vadd_vx_i16m1(input0, input_offset, vl);
+      input1 = __riscv_vadd_vx_i16m1(input1, input_offset, vl);
+
+      vint32m2_t acc0 = __riscv_vle32_v_i32m2(acc_buffer_ptr + channel, vl);
+      vint32m2_t acc1 = __riscv_vle32_v_i32m2(
+          acc_buffer_ptr + kOutputDepth + channel, vl);
+      acc0 = __riscv_vadd_vv_i32m2(
+          acc0, __riscv_vwmul_vv_i32m2(filter_val, input0, vl), vl);
+      acc1 = __riscv_vadd_vv_i32m2(
+          acc1, __riscv_vwmul_vv_i32m2(filter_val, input1, vl), vl);
+      __riscv_vse32_v_i32m2(acc_buffer_ptr + channel, acc0, vl);
+      __riscv_vse32_v_i32m2(acc_buffer_ptr + kOutputDepth + channel, acc1, vl);
+      channel += static_cast<int>(vl);
+    }
+    input_ptr += 2 * input_ptr_increment;
+    acc_buffer_ptr += 2 * kOutputDepth;
+  }
+
+  if (outp < num_output_pixels) {
+    RvvDepthwiseConvKernelDm1Single<kInputDepth>(
+        num_output_pixels - outp, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+}
+
+template <int kInputDepth>
+inline void RvvDepthwiseConvKernelDm2Single(
+    int num_output_pixels, const int8_t* input_ptr, int16_t input_offset,
+    int input_ptr_increment, const int8_t* filter_ptr,
+    int32_t* acc_buffer_ptr) {
+  constexpr int kDepthMultiplier = 2;
+  constexpr int kOutputDepth = kInputDepth * kDepthMultiplier;
+  constexpr int kFirstChunk = kOutputDepth > 8 ? 8 : kOutputDepth;
+  constexpr int kSecondChunk = kOutputDepth - kFirstChunk;
+  const size_t vl0 = __riscv_vsetvl_e8mf2(kFirstChunk);
+  const vint16m1_t filter0 =
+      optimized_ops::RvvLoadInt8AsInt16(filter_ptr, vl0);
+  if constexpr (kSecondChunk > 0) {
+    const size_t vl1 = __riscv_vsetvl_e8mf2(kSecondChunk);
+    const vint16m1_t filter1 =
+        optimized_ops::RvvLoadInt8AsInt16(filter_ptr + kFirstChunk, vl1);
+    for (int outp = 0; outp < num_output_pixels; ++outp) {
+      int16_t input_dup[kOutputDepth];
+      for (int ic = 0; ic < kInputDepth; ++ic) {
+        const int16_t input_val =
+            static_cast<int16_t>(input_ptr[ic]) + input_offset;
+        input_dup[2 * ic] = input_val;
+        input_dup[2 * ic + 1] = input_val;
+      }
+
+      const vint16m1_t input0 = __riscv_vle16_v_i16m1(input_dup, vl0);
+      vint32m2_t acc0 = __riscv_vle32_v_i32m2(acc_buffer_ptr, vl0);
+      acc0 = __riscv_vadd_vv_i32m2(
+          acc0, __riscv_vwmul_vv_i32m2(filter0, input0, vl0), vl0);
+      __riscv_vse32_v_i32m2(acc_buffer_ptr, acc0, vl0);
+
+      const vint16m1_t input1 =
+          __riscv_vle16_v_i16m1(input_dup + kFirstChunk, vl1);
+      vint32m2_t acc1 =
+          __riscv_vle32_v_i32m2(acc_buffer_ptr + kFirstChunk, vl1);
+      acc1 = __riscv_vadd_vv_i32m2(
+          acc1, __riscv_vwmul_vv_i32m2(filter1, input1, vl1), vl1);
+      __riscv_vse32_v_i32m2(acc_buffer_ptr + kFirstChunk, acc1, vl1);
+
+      input_ptr += input_ptr_increment;
+      acc_buffer_ptr += kOutputDepth;
+    }
+    return;
+  }
+
+  for (int outp = 0; outp < num_output_pixels; ++outp) {
+    int16_t input_dup[kOutputDepth];
+    for (int ic = 0; ic < kInputDepth; ++ic) {
+      const int16_t input_val =
+          static_cast<int16_t>(input_ptr[ic]) + input_offset;
+      input_dup[2 * ic] = input_val;
+      input_dup[2 * ic + 1] = input_val;
+    }
+
+    const vint16m1_t input0 = __riscv_vle16_v_i16m1(input_dup, vl0);
+    vint32m2_t acc0 = __riscv_vle32_v_i32m2(acc_buffer_ptr, vl0);
+    acc0 = __riscv_vadd_vv_i32m2(
+        acc0, __riscv_vwmul_vv_i32m2(filter0, input0, vl0), vl0);
+    __riscv_vse32_v_i32m2(acc_buffer_ptr, acc0, vl0);
+
+    input_ptr += input_ptr_increment;
+    acc_buffer_ptr += kOutputDepth;
+  }
+}
+
+template <int kInputDepth, int kOutputPixelsPerIter>
+inline void RvvDepthwiseConvKernelDm2Stride1(
+    int num_output_pixels, const int8_t* input_ptr, int16_t input_offset,
+    int input_ptr_increment, const int8_t* filter_ptr,
+    int32_t* acc_buffer_ptr) {
+  TFLITE_DCHECK_EQ(input_ptr_increment, kInputDepth);
+  constexpr int kDepthMultiplier = 2;
+  constexpr int kOutputDepth = kInputDepth * kDepthMultiplier;
+  constexpr int kFirstChunk = kOutputDepth > 8 ? 8 : kOutputDepth;
+  constexpr int kSecondChunk = kOutputDepth - kFirstChunk;
+  const size_t vl0 = __riscv_vsetvl_e8mf2(kFirstChunk);
+  const vint16m1_t filter0 =
+      optimized_ops::RvvLoadInt8AsInt16(filter_ptr, vl0);
+  int outp = 0;
+  if constexpr (kSecondChunk > 0) {
+    const size_t vl1 = __riscv_vsetvl_e8mf2(kSecondChunk);
+    const vint16m1_t filter1 =
+        optimized_ops::RvvLoadInt8AsInt16(filter_ptr + kFirstChunk, vl1);
+    for (; outp <= num_output_pixels - kOutputPixelsPerIter;
+         outp += kOutputPixelsPerIter) {
+      int16_t input_dup[kOutputPixelsPerIter][kOutputDepth];
+      for (int p = 0; p < kOutputPixelsPerIter; ++p) {
+        const int8_t* local_input_ptr = input_ptr + p * kInputDepth;
+        for (int ic = 0; ic < kInputDepth; ++ic) {
+          const int16_t input_val =
+              static_cast<int16_t>(local_input_ptr[ic]) + input_offset;
+          input_dup[p][2 * ic] = input_val;
+          input_dup[p][2 * ic + 1] = input_val;
+        }
+      }
+
+      for (int p = 0; p < kOutputPixelsPerIter; ++p) {
+        const int acc_offset = p * kOutputDepth;
+        const vint16m1_t input0 = __riscv_vle16_v_i16m1(input_dup[p], vl0);
+        vint32m2_t acc0 =
+            __riscv_vle32_v_i32m2(acc_buffer_ptr + acc_offset, vl0);
+        acc0 = __riscv_vadd_vv_i32m2(
+            acc0, __riscv_vwmul_vv_i32m2(filter0, input0, vl0), vl0);
+        __riscv_vse32_v_i32m2(acc_buffer_ptr + acc_offset, acc0, vl0);
+
+        const vint16m1_t input1 =
+            __riscv_vle16_v_i16m1(input_dup[p] + kFirstChunk, vl1);
+        vint32m2_t acc1 = __riscv_vle32_v_i32m2(
+            acc_buffer_ptr + acc_offset + kFirstChunk, vl1);
+        acc1 = __riscv_vadd_vv_i32m2(
+            acc1, __riscv_vwmul_vv_i32m2(filter1, input1, vl1), vl1);
+        __riscv_vse32_v_i32m2(acc_buffer_ptr + acc_offset + kFirstChunk, acc1,
+                              vl1);
+      }
+
+      input_ptr += kOutputPixelsPerIter * kInputDepth;
+      acc_buffer_ptr += kOutputPixelsPerIter * kOutputDepth;
+    }
+  } else {
+    for (; outp <= num_output_pixels - kOutputPixelsPerIter;
+         outp += kOutputPixelsPerIter) {
+      int16_t input_dup[kOutputPixelsPerIter][kOutputDepth];
+      for (int p = 0; p < kOutputPixelsPerIter; ++p) {
+        const int8_t* local_input_ptr = input_ptr + p * kInputDepth;
+        for (int ic = 0; ic < kInputDepth; ++ic) {
+          const int16_t input_val =
+              static_cast<int16_t>(local_input_ptr[ic]) + input_offset;
+          input_dup[p][2 * ic] = input_val;
+          input_dup[p][2 * ic + 1] = input_val;
+        }
+      }
+
+      for (int p = 0; p < kOutputPixelsPerIter; ++p) {
+        const int acc_offset = p * kOutputDepth;
+        const vint16m1_t input0 = __riscv_vle16_v_i16m1(input_dup[p], vl0);
+        vint32m2_t acc0 =
+            __riscv_vle32_v_i32m2(acc_buffer_ptr + acc_offset, vl0);
+        acc0 = __riscv_vadd_vv_i32m2(
+            acc0, __riscv_vwmul_vv_i32m2(filter0, input0, vl0), vl0);
+        __riscv_vse32_v_i32m2(acc_buffer_ptr + acc_offset, acc0, vl0);
+      }
+
+      input_ptr += kOutputPixelsPerIter * kInputDepth;
+      acc_buffer_ptr += kOutputPixelsPerIter * kOutputDepth;
+    }
+  }
+
+  if (outp < num_output_pixels) {
+    RvvDepthwiseConvKernelDm2Single<kInputDepth>(
+        num_output_pixels - outp, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+}
+
+template <int kInputDepth, int kDepthMultiplier>
+inline void RvvDepthwiseConvKernelFixedDmSingle(
+    int num_output_pixels, const int8_t* input_ptr, int16_t input_offset,
+    int input_ptr_increment, const int8_t* filter_ptr,
+    int32_t* acc_buffer_ptr) {
+  constexpr int kOutputDepth = kInputDepth * kDepthMultiplier;
+  for (int outp = 0; outp < num_output_pixels; ++outp) {
+    const int8_t* local_input_ptr = input_ptr;
+    const int8_t* local_filter_ptr = filter_ptr;
+    int32_t* local_acc_ptr = acc_buffer_ptr;
+    for (int ic = 0; ic < kInputDepth; ++ic) {
+      const int16_t input_val = *local_input_ptr++ + input_offset;
+      int m = 0;
+      for (; m < kDepthMultiplier;) {
+        const size_t vl = __riscv_vsetvl_e8mf2(kDepthMultiplier - m);
+        const vint16m1_t filter_val =
+            optimized_ops::RvvLoadInt8AsInt16(local_filter_ptr + m, vl);
+        vint32m2_t acc = __riscv_vle32_v_i32m2(local_acc_ptr + m, vl);
+        const vint16m1_t input_vec = __riscv_vmv_v_x_i16m1(input_val, vl);
+        acc = __riscv_vadd_vv_i32m2(
+            acc, __riscv_vwmul_vv_i32m2(filter_val, input_vec, vl), vl);
+        __riscv_vse32_v_i32m2(local_acc_ptr + m, acc, vl);
+        m += static_cast<int>(vl);
+      }
+      local_filter_ptr += kDepthMultiplier;
+      local_acc_ptr += kDepthMultiplier;
+    }
+    input_ptr += input_ptr_increment;
+    acc_buffer_ptr += kOutputDepth;
+  }
+}
+
+template <int kInputDepth, int kDepthMultiplier>
+inline void RvvDepthwiseConvKernelFixedDmStride1(
+    int num_output_pixels, const int8_t* input_ptr, int16_t input_offset,
+    int input_ptr_increment, const int8_t* filter_ptr,
+    int32_t* acc_buffer_ptr) {
+  TFLITE_DCHECK_EQ(input_ptr_increment, kInputDepth);
+  constexpr int kOutputDepth = kInputDepth * kDepthMultiplier;
+  int outp = 0;
+  for (; outp <= num_output_pixels - 2; outp += 2) {
+    const int8_t* input_ptr0 = input_ptr;
+    const int8_t* input_ptr1 = input_ptr + input_ptr_increment;
+    const int8_t* local_filter_ptr = filter_ptr;
+    int32_t* acc_ptr0 = acc_buffer_ptr;
+    int32_t* acc_ptr1 = acc_buffer_ptr + kOutputDepth;
+    for (int ic = 0; ic < kInputDepth; ++ic) {
+      const int16_t input0 = *input_ptr0++ + input_offset;
+      const int16_t input1 = *input_ptr1++ + input_offset;
+      int m = 0;
+      for (; m < kDepthMultiplier;) {
+        const size_t vl = __riscv_vsetvl_e8mf2(kDepthMultiplier - m);
+        const vint16m1_t filter_val =
+            optimized_ops::RvvLoadInt8AsInt16(local_filter_ptr + m, vl);
+        vint32m2_t acc0 = __riscv_vle32_v_i32m2(acc_ptr0 + m, vl);
+        vint32m2_t acc1 = __riscv_vle32_v_i32m2(acc_ptr1 + m, vl);
+        const vint16m1_t input0_vec = __riscv_vmv_v_x_i16m1(input0, vl);
+        const vint16m1_t input1_vec = __riscv_vmv_v_x_i16m1(input1, vl);
+        acc0 = __riscv_vadd_vv_i32m2(
+            acc0, __riscv_vwmul_vv_i32m2(filter_val, input0_vec, vl), vl);
+        acc1 = __riscv_vadd_vv_i32m2(
+            acc1, __riscv_vwmul_vv_i32m2(filter_val, input1_vec, vl), vl);
+        __riscv_vse32_v_i32m2(acc_ptr0 + m, acc0, vl);
+        __riscv_vse32_v_i32m2(acc_ptr1 + m, acc1, vl);
+        m += static_cast<int>(vl);
+      }
+      local_filter_ptr += kDepthMultiplier;
+      acc_ptr0 += kDepthMultiplier;
+      acc_ptr1 += kDepthMultiplier;
+    }
+    input_ptr += 2 * input_ptr_increment;
+    acc_buffer_ptr += 2 * kOutputDepth;
+  }
+
+  if (outp < num_output_pixels) {
+    RvvDepthwiseConvKernelFixedDmSingle<kInputDepth, kDepthMultiplier>(
+        num_output_pixels - outp, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+}
+#endif
 
 #ifdef USE_NEON
 template <>
@@ -1418,6 +1790,308 @@ struct QuantizedDepthwiseConvKernel<false, 12, 1> {
 };
 #endif
 
+#ifdef USE_RVV
+template <>
+struct QuantizedDepthwiseConvKernel<true, 0, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    for (int outp = 0; outp < num_output_pixels; ++outp) {
+      const int8_t* local_filter_ptr = filter_ptr;
+      const int8_t* local_input_ptr = input_ptr;
+      int32_t* local_acc_ptr = acc_buffer_ptr;
+      int ic = 0;
+      for (; ic < input_depth;) {
+        const size_t vl = __riscv_vsetvl_e8mf2(input_depth - ic);
+        vint16m1_t input_val =
+            optimized_ops::RvvLoadInt8AsInt16(local_input_ptr, vl);
+        const vint16m1_t filter_val =
+            optimized_ops::RvvLoadInt8AsInt16(local_filter_ptr, vl);
+        input_val = __riscv_vadd_vx_i16m1(input_val, input_offset, vl);
+        vint32m2_t acc = __riscv_vle32_v_i32m2(local_acc_ptr, vl);
+        const vint32m2_t product =
+            __riscv_vwmul_vv_i32m2(filter_val, input_val, vl);
+        acc = __riscv_vadd_vv_i32m2(acc, product, vl);
+        __riscv_vse32_v_i32m2(local_acc_ptr, acc, vl);
+        local_input_ptr += vl;
+        local_filter_ptr += vl;
+        local_acc_ptr += vl;
+        ic += static_cast<int>(vl);
+      }
+      input_ptr += input_ptr_increment;
+      acc_buffer_ptr += input_depth;
+    }
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 8, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 8);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Stride1<8>(num_output_pixels, input_ptr,
+                                        input_offset, input_ptr_increment,
+                                        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 4, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 4);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Stride1<4>(num_output_pixels, input_ptr,
+                                        input_offset, input_ptr_increment,
+                                        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 2, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 2);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Stride1<2>(num_output_pixels, input_ptr,
+                                        input_offset, input_ptr_increment,
+                                        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 12, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 12);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Stride1<12>(num_output_pixels, input_ptr,
+                                         input_offset, input_ptr_increment,
+                                         filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 16, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 16);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Single<16>(num_output_pixels, input_ptr,
+                                        input_offset, input_ptr_increment,
+                                        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 8, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 8);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Single<8>(num_output_pixels, input_ptr,
+                                       input_offset, input_ptr_increment,
+                                       filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 2, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 2);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Single<2>(num_output_pixels, input_ptr,
+                                       input_offset, input_ptr_increment,
+                                       filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 4, 1> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 4);
+    TFLITE_DCHECK_EQ(depth_multiplier, 1);
+    RvvDepthwiseConvKernelDm1Single<4>(num_output_pixels, input_ptr,
+                                       input_offset, input_ptr_increment,
+                                       filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 8, 2> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 8);
+    TFLITE_DCHECK_EQ(depth_multiplier, 2);
+    RvvDepthwiseConvKernelDm2Single<8>(num_output_pixels, input_ptr,
+                                       input_offset, input_ptr_increment,
+                                       filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 4, 2> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 4);
+    TFLITE_DCHECK_EQ(depth_multiplier, 2);
+    RvvDepthwiseConvKernelDm2Stride1<4, 2>(num_output_pixels, input_ptr,
+                                           input_offset, input_ptr_increment,
+                                           filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 2, 2> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 2);
+    TFLITE_DCHECK_EQ(depth_multiplier, 2);
+    RvvDepthwiseConvKernelDm2Stride1<2, 4>(num_output_pixels, input_ptr,
+                                           input_offset, input_ptr_increment,
+                                           filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 1, 2> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 1);
+    TFLITE_DCHECK_EQ(depth_multiplier, 2);
+    RvvDepthwiseConvKernelDm2Stride1<1, 8>(num_output_pixels, input_ptr,
+                                           input_offset, input_ptr_increment,
+                                           filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 1, 4> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 1);
+    TFLITE_DCHECK_EQ(depth_multiplier, 4);
+    RvvDepthwiseConvKernelFixedDmStride1<1, 4>(
+        num_output_pixels, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 4, 4> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 4);
+    TFLITE_DCHECK_EQ(depth_multiplier, 4);
+    RvvDepthwiseConvKernelFixedDmStride1<4, 4>(
+        num_output_pixels, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<false, 2, 8> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 2);
+    TFLITE_DCHECK_EQ(depth_multiplier, 8);
+    RvvDepthwiseConvKernelFixedDmStride1<2, 8>(
+        num_output_pixels, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 1, 8> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 1);
+    TFLITE_DCHECK_EQ(depth_multiplier, 8);
+    RvvDepthwiseConvKernelFixedDmSingle<1, 8>(
+        num_output_pixels, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 1, 16> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 1);
+    TFLITE_DCHECK_EQ(depth_multiplier, 16);
+    RvvDepthwiseConvKernelFixedDmSingle<1, 16>(
+        num_output_pixels, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 1, 20> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 1);
+    TFLITE_DCHECK_EQ(depth_multiplier, 20);
+    RvvDepthwiseConvKernelFixedDmSingle<1, 20>(
+        num_output_pixels, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+};
+
+template <>
+struct QuantizedDepthwiseConvKernel<true, 1, 32> {
+  static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
+                  const int8_t* input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t* filter_ptr,
+                  int32_t* acc_buffer_ptr) {
+    TFLITE_DCHECK_EQ(input_depth, 1);
+    TFLITE_DCHECK_EQ(depth_multiplier, 32);
+    RvvDepthwiseConvKernelFixedDmSingle<1, 32>(
+        num_output_pixels, input_ptr, input_offset, input_ptr_increment,
+        filter_ptr, acc_buffer_ptr);
+  }
+};
+#endif
+
 // Accumulates the effect of one row of the filter, on a segment of one row
 // of the output, accessing the corresponding one row of the input.
 template <bool kAllowStrided, int kFixedInputDepth, int kFixedDepthMultiplier>
@@ -1502,6 +2176,93 @@ inline void QuantizedDepthwiseConvAccumRowGeneric(
     int out_x_buffer_start, int out_x_buffer_end, int output_depth,
     int32_t* acc_buffer) {
   ruy::profiler::ScopeLabel label("DepthwiseConvAccumRowGeneric (slow)");
+#ifdef USE_RVV
+  if (depth_multiplier == 1) {
+    const int8_t* filter_base_ptr = filter_data;
+    for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+      const int out_x_loop_start = std::max(
+          out_x_buffer_start,
+          (pad_width - dilation_factor * filter_x + stride - 1) / stride);
+      const int out_x_loop_end = std::min(
+          out_x_buffer_end,
+          (pad_width + input_width - dilation_factor * filter_x + stride - 1) /
+              stride);
+
+      int32_t* acc_buffer_ptr =
+          acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
+      const int in_x_origin =
+          (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
+      const int8_t* input_ptr = input_data + in_x_origin * input_depth;
+      const int input_ptr_increment = (stride - 1) * input_depth;
+      for (int out_x = out_x_loop_start; out_x < out_x_loop_end; ++out_x) {
+        const int8_t* input_channel_ptr = input_ptr;
+        int channel = 0;
+        for (; channel < input_depth;) {
+          const size_t vl = __riscv_vsetvl_e8mf2(input_depth - channel);
+          vint16m1_t input_val = optimized_ops::RvvLoadInt8AsInt16(
+              input_channel_ptr + channel, vl);
+          const vint16m1_t filter_val = optimized_ops::RvvLoadInt8AsInt16(
+              filter_base_ptr + channel, vl);
+          input_val = __riscv_vadd_vx_i16m1(input_val, input_offset, vl);
+          vint32m2_t acc = __riscv_vle32_v_i32m2(acc_buffer_ptr + channel, vl);
+          const vint32m2_t product =
+              __riscv_vwmul_vv_i32m2(filter_val, input_val, vl);
+          acc = __riscv_vadd_vv_i32m2(acc, product, vl);
+          __riscv_vse32_v_i32m2(acc_buffer_ptr + channel, acc, vl);
+          channel += static_cast<int>(vl);
+        }
+        input_ptr = input_channel_ptr + input_depth + input_ptr_increment;
+        acc_buffer_ptr += output_depth;
+      }
+      filter_base_ptr += output_depth;
+    }
+    return;
+  }
+
+  {
+    const int8_t* filter_base_ptr = filter_data;
+    for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+      const int out_x_loop_start = std::max(
+          out_x_buffer_start,
+          (pad_width - dilation_factor * filter_x + stride - 1) / stride);
+      const int out_x_loop_end = std::min(
+          out_x_buffer_end,
+          (pad_width + input_width - dilation_factor * filter_x + stride - 1) /
+              stride);
+
+      int32_t* acc_buffer_ptr =
+          acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
+      const int in_x_origin =
+          (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
+      const int8_t* input_ptr = input_data + in_x_origin * input_depth;
+      const int input_ptr_increment = (stride - 1) * input_depth;
+      for (int out_x = out_x_loop_start; out_x < out_x_loop_end; ++out_x) {
+        const int8_t* filter_ptr = filter_base_ptr;
+        for (int ic = 0; ic < input_depth; ++ic) {
+          const int16_t input_val = *input_ptr++ + input_offset;
+          int m = 0;
+          for (; m < depth_multiplier;) {
+            const size_t vl = __riscv_vsetvl_e8mf2(depth_multiplier - m);
+            const vint16m1_t filter_val = optimized_ops::RvvLoadInt8AsInt16(
+                filter_ptr + m, vl);
+            vint32m2_t acc = __riscv_vle32_v_i32m2(acc_buffer_ptr + m, vl);
+            const vint16m1_t input_vec = __riscv_vmv_v_x_i16m1(input_val, vl);
+            const vint32m2_t product =
+                __riscv_vwmul_vv_i32m2(filter_val, input_vec, vl);
+            acc = __riscv_vadd_vv_i32m2(acc, product, vl);
+            __riscv_vse32_v_i32m2(acc_buffer_ptr + m, acc, vl);
+            m += static_cast<int>(vl);
+          }
+          filter_ptr += depth_multiplier;
+          acc_buffer_ptr += depth_multiplier;
+        }
+        input_ptr += input_ptr_increment;
+      }
+      filter_base_ptr += output_depth;
+    }
+    return;
+  }
+#endif
   const int8_t* filter_base_ptr = filter_data;
   for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
     const int out_x_loop_start = std::max(
@@ -1538,6 +2299,18 @@ inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
                                        const int32_t* bias_data,
                                        int32_t* acc_buffer) {
   int i = 0;
+#ifdef USE_RVV
+  for (; i < num_output_pixels; ++i) {
+    int channel = 0;
+    for (; channel < output_depth;) {
+      const size_t vl = __riscv_vsetvl_e32m2(output_depth - channel);
+      const vint32m2_t bias = __riscv_vle32_v_i32m2(bias_data + channel, vl);
+      __riscv_vse32_v_i32m2(acc_buffer + i * output_depth + channel, bias, vl);
+      channel += static_cast<int>(vl);
+    }
+  }
+  return;
+#endif
 #ifdef USE_NEON
   if (output_depth == 1) {
     const int32x4_t b = vdupq_n_s32(bias_data[0]);
@@ -1707,6 +2480,35 @@ inline void DepthwiseConvGeneral(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
 #endif  // USE_NEON
+#ifdef USE_RVV
+  // Keep RVV kernel selection aligned with the NEON dispatch table. Most RVV
+  // cases reuse the generic template Run(), while true,0,1 has its own RVV
+  // specialization above.
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 1, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 4, 4)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(false, 12, 1)
+
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 16, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 16)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 20)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 32)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 1, 8)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 8, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 2, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 4, 1)
+
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 1)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
+  TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
+#endif
 
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {

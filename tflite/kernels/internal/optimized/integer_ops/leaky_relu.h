@@ -16,9 +16,11 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_LEAKY_RELU_H_
 
 #include <algorithm>
+#include <limits>
 
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/avx2_quantization_utils.h"
+#include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -86,6 +88,33 @@ inline void QuantizeLeakyRelu(const LeakyReluParams& params,
     avx2_utils::CastInt32ToInt16AndStore(output_data + i + 8, input_high);
   }
 #endif  // __AVX2__
+
+#ifdef USE_RVV
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e16m1(flat_size - i);
+    const vint16m1_t input16 = __riscv_vle16_v_i16m1(input_data + i, vl);
+    vint32m2_t input32 = __riscv_vwadd_vx_i32m2(input16, 0, vl);
+    input32 = __riscv_vsub_vx_i32m2(input32, params.input_offset, vl);
+
+    const vint32m2_t identity_output =
+        optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+            input32, params.output_multiplier_identity,
+            params.output_shift_identity, vl);
+    const vint32m2_t alpha_output =
+        optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+            input32, params.output_multiplier_alpha,
+            params.output_shift_alpha, vl);
+    const vbool16_t negative = __riscv_vmslt_vx_i32m2_b16(input32, 0, vl);
+    vint32m2_t output32 =
+        __riscv_vmerge_vvm_i32m2(identity_output, alpha_output, negative, vl);
+    output32 = __riscv_vadd_vx_i32m2(output32, params.output_offset, vl);
+    output32 = __riscv_vmin_vx_i32m2(output32, quantized_max, vl);
+    output32 = __riscv_vmax_vx_i32m2(output32, quantized_min, vl);
+    optimized_ops::RvvStoreInt16FromInt32(output32, output_data + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   for (; i < flat_size; ++i) {
     const int32_t input_value = input_data[i] - params.input_offset;

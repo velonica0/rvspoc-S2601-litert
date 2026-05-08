@@ -140,6 +140,36 @@ inline void AddElementwiseInt8(int size, const ArithmeticParams& params,
     vst1q_s8(output_data + i, clamped);
   }
 #endif  // NEON
+#ifdef USE_RVV
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8mf2(size - i);
+    vint16m1_t input1_val =
+        optimized_ops::RvvLoadInt8AsInt16(input1_data + i, vl);
+    vint16m1_t input2_val =
+        optimized_ops::RvvLoadInt8AsInt16(input2_data + i, vl);
+    input1_val = __riscv_vadd_vx_i16m1(input1_val, params.input1_offset, vl);
+    input2_val = __riscv_vadd_vx_i16m1(input2_val, params.input2_offset, vl);
+    vint32m2_t x11 = __riscv_vwadd_vx_i32m2(input1_val, 0, vl);
+    vint32m2_t x21 = __riscv_vwadd_vx_i32m2(input2_val, 0, vl);
+    if (params.left_shift > 0) {
+      x11 = __riscv_vsll_vx_i32m2(x11, params.left_shift, vl);
+      x21 = __riscv_vsll_vx_i32m2(x21, params.left_shift, vl);
+    }
+    x11 = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        x11, params.input1_multiplier, params.input1_shift, vl);
+    x21 = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        x21, params.input2_multiplier, params.input2_shift, vl);
+    vint32m2_t sum = __riscv_vadd_vv_i32m2(x11, x21, vl);
+    sum = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        sum, params.output_multiplier, params.output_shift, vl);
+    sum = __riscv_vadd_vx_i32m2(sum, params.output_offset, vl);
+    sum = __riscv_vmax_vx_i32m2(sum, params.quantized_activation_min, vl);
+    sum = __riscv_vmin_vx_i32m2(sum, params.quantized_activation_max, vl);
+    optimized_ops::RvvStoreInt8FromInt32(sum, output_data + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   for (; i < size; ++i) {
     const int32 input1_val = params.input1_offset + input1_data[i];
@@ -330,6 +360,32 @@ inline void AddElementwiseInt16(int size, const ArithmeticParams& params,
     vst1q_s16(output_data + 8 + i, s2);
   }
 #endif  // NEON
+#ifdef USE_RVV
+  const int32_t input1_left_shift = params.left_shift + params.input1_shift;
+  const int32_t input2_left_shift = params.left_shift + params.input2_shift;
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e16m1(size - i);
+    const vint16m1_t input1_val_original = __riscv_vle16_v_i16m1(input1_data + i, vl);
+    const vint16m1_t input2_val_original = __riscv_vle16_v_i16m1(input2_data + i, vl);
+    vint32m2_t x11 = __riscv_vwadd_vx_i32m2(input1_val_original, 0, vl);
+    vint32m2_t x21 = __riscv_vwadd_vx_i32m2(input2_val_original, 0, vl);
+    x11 = __riscv_vadd_vx_i32m2(x11, params.input1_offset, vl);
+    x21 = __riscv_vadd_vx_i32m2(x21, params.input2_offset, vl);
+    x11 = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        x11, params.input1_multiplier, input1_left_shift, vl);
+    x21 = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        x21, params.input2_multiplier, input2_left_shift, vl);
+    vint32m2_t sum = __riscv_vadd_vv_i32m2(x11, x21, vl);
+    sum = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        sum, params.output_multiplier, params.output_shift, vl);
+    sum = __riscv_vadd_vx_i32m2(sum, params.output_offset, vl);
+    sum = __riscv_vmax_vx_i32m2(sum, params.quantized_activation_min, vl);
+    sum = __riscv_vmin_vx_i32m2(sum, params.quantized_activation_max, vl);
+    optimized_ops::RvvStoreInt16FromInt32(sum, output_data + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   for (; i < size; ++i) {
     const int32 input1_val = params.input1_offset + input1_data[i];
@@ -426,6 +482,33 @@ inline void AddScalarBroadcast(int size, const ArithmeticParams& params,
     vst1_s8(output_data + i, clamped);
   }
 #endif  // NEON
+#ifdef USE_RVV
+  const int32 scaled_input1_val =
+      MultiplyByQuantizedMultiplierSmallerThanOneExp(
+          (params.input1_offset + input1_data) * (1 << params.left_shift),
+          params.input1_multiplier, params.input1_shift);
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8mf2(size - i);
+    vint16m1_t input2_val =
+        optimized_ops::RvvLoadInt8AsInt16(input2_data + i, vl);
+    input2_val = __riscv_vadd_vx_i16m1(input2_val, params.input2_offset, vl);
+    vint32m2_t x21 = __riscv_vwadd_vx_i32m2(input2_val, 0, vl);
+    if (params.left_shift > 0) {
+      x21 = __riscv_vsll_vx_i32m2(x21, params.left_shift, vl);
+    }
+    x21 = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        x21, params.input2_multiplier, params.input2_shift, vl);
+    vint32m2_t sum = __riscv_vadd_vx_i32m2(x21, scaled_input1_val, vl);
+    sum = optimized_ops::RvvOptimizedOpsMultiplyByQuantizedMultiplier(
+        sum, params.output_multiplier, params.output_shift, vl);
+    sum = __riscv_vadd_vx_i32m2(sum, params.output_offset, vl);
+    sum = __riscv_vmax_vx_i32m2(sum, params.quantized_activation_min, vl);
+    sum = __riscv_vmin_vx_i32m2(sum, params.quantized_activation_max, vl);
+    optimized_ops::RvvStoreInt8FromInt32(sum, output_data + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   if (i < size) {
     // Process broadcast scalar.

@@ -51,6 +51,16 @@ inline void LookupTable(const uint8_t* input_data, int num_elements,
   }
   // Postamble and non-ARM64 code: simple for loop.
 #endif
+#ifdef USE_RVV
+  for (; i < num_elements;) {
+    const size_t vl = __riscv_vsetvl_e8mf2(num_elements - i);
+    const vuint8mf2_t input = __riscv_vle8_v_u8mf2(input_data + i, vl);
+    const vuint8mf2_t output = __riscv_vloxei8(lut, input, vl);
+    __riscv_vse8_v_u8mf2(output_data + i, output, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
   for (; i < num_elements; ++i) {
     output_data[i] = lut[input_data[i]];
   }
