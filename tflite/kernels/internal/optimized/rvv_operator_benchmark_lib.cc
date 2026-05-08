@@ -217,33 +217,15 @@ float HorizontalSum(vfloat32m1_t values, size_t vl) {
 }
 #endif
 
+#if defined(__GNUC__)
+__attribute__((optimize("no-tree-vectorize", "no-tree-slp-vectorize")))
+#endif
 float VectorVectorDotProduct(const float* lhs, const float* rhs, int v_size) {
-#ifdef USE_RVV
-  if (v_size <= 0) {
-    return 0.0f;
-  }
-  const size_t vlmax = __riscv_vsetvlmax_e32m1();
-  const int step = static_cast<int>(vlmax);
-  vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(0.0f, vlmax);
-  int col = 0;
-  const int full_cols = v_size / step * step;
-  for (; col < full_cols; col += step) {
-    const vfloat32m1_t lhs_vec = __riscv_vle32_v_f32m1(lhs + col, vlmax);
-    const vfloat32m1_t rhs_vec = __riscv_vle32_v_f32m1(rhs + col, vlmax);
-    acc = __riscv_vfmacc_vv_f32m1(acc, lhs_vec, rhs_vec, vlmax);
-  }
-  float dot = HorizontalSum(acc, vlmax);
-  for (; col < v_size; ++col) {
-    dot += lhs[col] * rhs[col];
-  }
-  return dot;
-#else
   float dot = 0.0f;
   for (int i = 0; i < v_size; ++i) {
     dot += lhs[i] * rhs[i];
   }
   return dot;
-#endif
 }
 
 void LstmEvalMatrixBatchVectorMultiplyAccumulate(

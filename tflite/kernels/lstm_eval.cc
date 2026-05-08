@@ -42,15 +42,36 @@ namespace builtin {
 namespace lstm_eval {
 namespace {
 
+#if defined(__riscv_vector) && defined(__GNUC__)
+__attribute__((optimize("no-tree-vectorize", "no-tree-slp-vectorize")))
+#endif
+void RiscvAccurateMatrixBatchVectorMultiplyAccumulate(
+    const float* matrix, const float* vector, const float* result,
+    float* output, int m_rows, int m_cols, int n_batch) {
+  std::copy_n(result, m_rows * n_batch, output);
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const float* vector_in_batch = vector + batch * m_cols;
+    const float* matrix_ptr = matrix;
+    float* output_in_batch = output + batch * m_rows;
+    for (int row = 0; row < m_rows; ++row) {
+      float dot = 0.0f;
+      for (int col = 0; col < m_cols; ++col) {
+        dot += matrix_ptr[col] * vector_in_batch[col];
+      }
+      output_in_batch[row] += dot;
+      matrix_ptr += m_cols;
+    }
+  }
+}
+
 void MatrixBatchVectorMultiplyAccumulate(
     const float* matrix, const float* vector, const float* result,
     float* output, int m_rows, int m_cols, int n_batch,
     CpuBackendContext* cpu_backend_context) {
 #if defined(__riscv_vector)
   (void)cpu_backend_context;
-  std::copy_n(result, m_rows * n_batch, output);
-  tensor_utils::MatrixBatchVectorMultiplyAccumulate(matrix, m_rows, m_cols,
-                                                    vector, n_batch, output);
+  RiscvAccurateMatrixBatchVectorMultiplyAccumulate(
+      matrix, vector, result, output, m_rows, m_cols, n_batch);
   return;
 #else
   tflite::FullyConnectedParams float_fc_params;

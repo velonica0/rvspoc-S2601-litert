@@ -201,6 +201,27 @@ TfLiteStatus VerifyQuantizationZeroPoint(const TfLiteTensor* tensor,
   return kTfLiteOk;
 }
 
+#if defined(__riscv_vector) && defined(__GNUC__)
+__attribute__((optimize("no-tree-vectorize", "no-tree-slp-vectorize")))
+#endif
+void RiscvAccurateMatrixBatchVectorMultiplyAccumulate(
+    const float* matrix, int m_rows, int m_cols, const float* vector,
+    int n_batch, float* result) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const float* vector_in_batch = vector + batch * m_cols;
+    const float* matrix_ptr = matrix;
+    float* result_in_batch = result + batch * m_rows;
+    for (int row = 0; row < m_rows; ++row) {
+      float dot = 0.0f;
+      for (int col = 0; col < m_cols; ++col) {
+        dot += matrix_ptr[col] * vector_in_batch[col];
+      }
+      result_in_batch[row] += dot;
+      matrix_ptr += m_cols;
+    }
+  }
+}
+
 }  // namespace
 
 TfLiteStatus ValidateInt16FilterInt16Indexing(
@@ -782,9 +803,15 @@ TfLiteStatus EvalPie(TfLiteContext* context, TfLiteNode* node,
   }
 
   // Compute output += weight * input
+#if defined(__riscv_vector)
+  RiscvAccurateMatrixBatchVectorMultiplyAccumulate(
+      GetTensorData<float>(filter), num_units, input_size,
+      GetTensorData<float>(input), batch_size, GetTensorData<float>(output));
+#else
   tensor_utils::MatrixBatchVectorMultiplyAccumulate(
       GetTensorData<float>(filter), num_units, input_size,
       GetTensorData<float>(input), batch_size, GetTensorData<float>(output));
+#endif
 
   // Apply activation function
   tensor_utils::ApplyActivationToVector(
