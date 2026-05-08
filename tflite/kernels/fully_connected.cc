@@ -1922,6 +1922,15 @@ TfLiteStatus EvalFloat(TfLiteContext* context, TfLiteNode* node,
   } else if (kernel_type == kLegacyPie) {
     return EvalPie(context, node, params, data, input, filter, bias, output);
   } else {
+#if defined(__riscv_vector)
+    // Route dense float FullyConnected through the tensor_utils-based path on
+    // RVV targets so the operator can directly benefit from the RVV matvec and
+    // activation helpers we maintain alongside the NEON-style tensor_utils
+    // stack. Sparse float paths keep their specialized implementations below.
+    if (filter->sparsity == nullptr) {
+      return EvalPie(context, node, params, data, input, filter, bias, output);
+    }
+#endif
     FullyConnectedParams op_params;
     op_params.float_activation_min = output_activation_min;
     op_params.float_activation_max = output_activation_max;

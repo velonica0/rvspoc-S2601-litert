@@ -46,6 +46,13 @@ void MatrixBatchVectorMultiplyAccumulate(
     const float* matrix, const float* vector, const float* result,
     float* output, int m_rows, int m_cols, int n_batch,
     CpuBackendContext* cpu_backend_context) {
+#if defined(__riscv_vector)
+  (void)cpu_backend_context;
+  std::copy_n(result, m_rows * n_batch, output);
+  tensor_utils::MatrixBatchVectorMultiplyAccumulate(matrix, m_rows, m_cols,
+                                                    vector, n_batch, output);
+  return;
+#else
   tflite::FullyConnectedParams float_fc_params;
   float_fc_params.float_activation_min = std::numeric_limits<float>::lowest();
   float_fc_params.float_activation_max = std::numeric_limits<float>::max();
@@ -67,6 +74,7 @@ void MatrixBatchVectorMultiplyAccumulate(
       output[i] += result[i];
     }
   }
+#endif
 }
 
 void ComputeRowSums(
