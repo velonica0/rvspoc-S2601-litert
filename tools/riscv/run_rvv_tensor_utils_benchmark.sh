@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build-riscv-bench"
-OUT_FILE="${ROOT_DIR}/docs/rvv_scalar_benchmarks.md"
+BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build-riscv-bench}"
+OUT_FILE="${OUT_FILE:-${ROOT_DIR}/docs/rvv_scalar_benchmarks.md}"
 
 mkdir -p "${BUILD_DIR}"
 
