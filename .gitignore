@@ -22,6 +22,7 @@ Thumbs.db
 cmake_build_android_arm64/
 host_flatc_build/
 cmake_build/
+build-riscv-bench/
 
 /.bazelrc.user
 /bazel-*

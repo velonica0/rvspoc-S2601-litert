@@ -13,11 +13,11 @@ trap cleanup EXIT
 TENSOR_UTILS_OUT="${TMP_DIR}/rvv_tensor_utils_benchmarks.md"
 OPERATOR_OUT="${TMP_DIR}/rvv_operator_benchmarks.md"
 RVV_COMMITS=(
-  8edc8e0d
-  36a4fa2f
-  d447fe69
-  84e86354
-  82d3365e
+  '8edc8e0d|2026-05-08|integer_ops'
+  '36a4fa2f|2026-05-08|optimized_ops.h'
+  'd447fe69|2026-05-07|Portable 2 RVV'
+  '84e86354|2026-05-07|all rvv_tensor_utils ops'
+  '82d3365e|2026-05-06|rvv_tensor_utils_impl'
 )
 
 echo "[run] tensor_utils benchmark"
@@ -34,15 +34,15 @@ mkdir -p "$(dirname "${FINAL_OUT}")"
   echo "- Date: $(date '+%Y-%m-%d %H:%M:%S %Z')"
   echo "- Host: $(uname -a)"
   echo "- Compiler: $(${CXX:-g++} --version | head -n 1)"
-  echo "- Scope: recent five commits that introduced or wired RVV coverage"
+  echo "- Scope: recent five commits that introduced or wired RVV coverage, plus follow-up P1 gap closures for \`reduce.h\` and \`resize_bilinear.h\`"
   echo
   echo "## Recent Five Commits"
   echo
   echo "| Commit | Date | Summary |"
   echo "| --- | --- | --- |"
-  for commit in "${RVV_COMMITS[@]}"; do
-    git -C "${ROOT_DIR}" show -s --date=short \
-      --format='| `%h` | %ad | %s |' "${commit}"
+  for commit_meta in "${RVV_COMMITS[@]}"; do
+    IFS='|' read -r commit date summary <<<"${commit_meta}"
+    echo "| \`${commit}\` | ${date} | ${summary} |"
   done
   echo
   echo "## Coverage Map"
@@ -62,6 +62,8 @@ mkdir -p "$(dirname "${FINAL_OUT}")"
   echo "| \`tflite/kernels/internal/optimized/integer_ops/leaky_relu.h\` | \`8edc8e0d\` | int16 LeakyReLU |"
   echo "| \`tflite/kernels/internal/optimized/integer_ops/lut.h\` | \`8edc8e0d\` | uint8/int8 lookup table |"
   echo "| \`tflite/kernels/internal/optimized/integer_ops/mean.h\` | \`8edc8e0d\` | int8 mean reduction |"
+  echo "| \`tflite/kernels/internal/optimized/reduce.h\` | Follow-up P1 closure (2026-05-08) | uint8 keep-dims height-width mean and float last-dim mean |"
+  echo "| \`tflite/kernels/internal/optimized/resize_bilinear.h\` | Follow-up P1 closure (2026-05-08) | float and uint8 generic bilinear resize kernels |"
   echo
   echo "## \`tflite/kernels/internal/optimized/rvv_tensor_utils.cc\`"
   echo

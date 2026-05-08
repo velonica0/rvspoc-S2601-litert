@@ -1,0 +1,97 @@
+# RVV Findings
+
+- 2026-05-06: K3 机器架构为 `riscv64`，编译器为 `g++ 15.2.0`，`cmake` 位于 `/home/openkylin/.local/bin/cmake`。
+- 2026-05-06: K3 默认编译宏里没有 `__riscv_vector`，只有在显式传入 `-march=rv64gcv_zvl128b -mabi=lp64d` 后才会打开 RVV intrinsics 分支。
+- 2026-05-06: 按照更接近 NEON/SSE 的小改动方案，K3 上已完成两项结构验证，并在补上 RVV 量化 wrapper 后再次复验通过：
+  - `tflite/kernels/internal/tensor_utils.cc` 在 `-march=rv64gcv_zvl128b -mabi=lp64d` 下执行 `g++ -fsyntax-only`，结果为 `SYNTAX_OK`。
+  - public helper dispatch probe 链接 `tensor_utils.cc + reference/portable_tensor_utils.cc + optimized/rvv_tensor_utils.cc + common.cc` 后可直接运行，结果为 `DISPATCH_OK`。
+- 2026-05-06: `tools/riscv/run_rvv_tensor_utils_benchmark.sh` 已在 K3 重新跑通，最新结果时间为 `2026-05-06 18:18:04 CST`，实测 VLEN 为 256 bit，详细数据记录在 `docs/rvv_scalar_benchmarks.md`。
+- 2026-05-06: 最新 benchmark 的 float 路径中，最大的 `max abs diff` 为 `1.1063e-04`，最大的 `mean abs diff` 为 `9.1973e-06`，主要来自浮点累加顺序变化；表中的 `max rel diff` 在接近零输出上会被放大，因此判断精度时更应结合 `max abs diff` 和 `mean abs diff` 一起看。
+- 2026-05-06: 仓库规模远大于单个 helper 级 patch：`tflite/kernels/*.cc` 共 319 个源文件，`tflite/kernels/internal/**/*.cc` 共 54 个源文件。因此“所有 kernel” 更现实的推进方式必须采用“全量可运行 + 热点分层加速”的策略。
+- 2026-05-06: GCC 15.2.0 在 K3 上已验证可用的关键 RVV intrinsic 组合包括 `vfredusum`、`vredsum`、`vwadd_vx`、`vwmul_vv/vwmul_vx`、`vsll_vx`、`vnsra_wx`、`vnclip_wx`、`vand_vx/vand_vv`、`vmerge_vxm`、`vmslt/vmsne`、`vmfne_vf`、`vfcvt_f_x_v`、`vfmul_vf`、`vfmin/vfmax`、`vmin/vmax`，因此当前实现已能稳定覆盖 reduction/dot、clip、sub1、vector-scale，以及需要精确量化乘子的 recurrent/cwise helper。
+- 2026-05-06: `TfLiteRound` 的 “ties away from zero” 语义可以在 RVV 里稳定复现为 `vfsgnj(0.5, x) + x` 再接 `vfcvt_rtz_x_f_v`；这次 `SymmetricQuantizeFloats` / `AsymmetricQuantizeFloats` 就是依赖这条组合，才能做到 output 与 scalar 完全一致，同时把量化主循环向量化。
+- 2026-05-06: benchmark 已从 7 组共享 helper 扩成“matvec/reduction + first-tier recurrent/cwise/normalization”这一整批；以 `2026-05-06 17:37:09 CST` 这轮 K3 实测为准，对应的 RVV speedup 范围如下：
+  - `VectorVectorDotProduct<float>`: `2.69x` 到 `5.27x`
+  - `ReductionSumVector<float>`: `1.30x` 到 `8.07x`
+  - `ReductionSumVector<int8 -> int32>`: `1.02x` 到 `1.31x`
+  - `MatrixScalarMultiplyAccumulate<int8>`: `2.60x` 到 `3.93x`
+  - `MatrixBatchVectorMultiplyAccumulate<float>`: `3.08x` 到 `3.55x`
+  - `MatrixBatchVectorMultiplyAccumulate<int8>`: `2.47x` 到 `4.62x`
+  - `MatrixBatchVectorMultiplyAccumulate<int8, per-channel + input_offset>`: `2.50x` 到 `4.44x`
+- 2026-05-06: 这轮新增 first-tier helper 的 K3 实测结果显示：
+  - `CwiseAdd<int16>`: `1.78x` 到 `2.50x`
+  - `CwiseClipping<float>`: 稳定约 `1.54x`
+  - `Sub1Vector<float>`: `1.61x` 到 `1.70x`
+  - `Sub1Vector<int16>`: `3.16x` 到 `3.52x`
+  - `VectorScalarMultiply<int8 -> float>`: `2.91x` 到 `3.04x`
+  - `MeanStddevNormalization<float>`: `1.40x` 到 `1.55x`
+  - `CwiseMul<int16 -> int16>`: `1.24x` 到 `1.27x`
+  - `CwiseMul<int16 -> int8>`: `2.92x` 到 `3.94x`
+  - `VectorBatchVectorCwiseProductAccumulate<int16>`: `3.04x` 到 `3.87x`
+  - `ApplyLayerNorm<int16>`: `1.02x` / `0.99x` / `0.95x`，小尺寸已转正，但中大尺寸仍接近持平或略慢。
+  - `ApplySigmoid<int16>`: 精确对齐 scalar，约 `1.01x` 到 `1.02x`。
+  - `ApplyTanh<int16>`: 精确对齐 scalar，约 `1.00x` 到 `1.01x`。
+- 2026-05-06: `2026-05-06 17:58:06 CST` 这轮又补齐了两条真正和 NEON 对齐的 hybrid quantization helper：
+  - `SymmetricQuantizeFloats`: `2.12x` 到 `2.81x`，`output/min/max/scale` 全部精确对齐 scalar。
+  - `AsymmetricQuantizeFloats`: `2.39x` 到 `2.98x`，`output/scale/offset` 全部精确对齐 scalar。
+- 2026-05-06: `2026-05-06 18:18:04 CST` 这轮继续把之前剩下的 NEON-style wrapper 缺口补到了 RVV，包括：
+  - sparse float: `SparseMatrixBatchVectorMultiplyAccumulate1x4` 与 ledger 版 float sparse matvec
+  - sparse int8: `SparseMatrixBatchVectorMultiplyAccumulate1x16` 与 `int8 -> float` ledger 版 sparse matvec
+  - int8 recurrent/project helper: `MatrixBatchVectorMultiplyAccumulate(... -> int16_t)` 与 `(... -> int8_t)`
+  - `IsZeroVector<float/int8>` benchmark 也补齐，方便把当前 RVV helper 覆盖做成完整速度表
+- 2026-05-06: 以 `2026-05-06 18:18:04 CST` 这轮 K3 实测为准，新增这批 helper 的 RVV speedup 范围如下：
+  - `IsZeroVector<float>`: `1.93x` 到 `1.95x`
+  - `IsZeroVector<int8>`: `2.00x` 到 `2.14x`
+  - `MatrixBatchVectorMultiplyAccumulate<int8 -> int16>`: `3.56x` 到 `4.52x`
+  - `MatrixBatchVectorMultiplyAccumulate<int8 -> int8>`: `3.59x` 到 `4.40x`
+  - `SparseMatrixBatchVectorMultiplyAccumulate1x4<float>`: `1.87x` 到 `2.02x`
+  - `SparseMatrixBatchVectorMultiplyAccumulate<float ledger>`: `2.09x` 到 `2.76x`
+  - `SparseMatrixBatchVectorMultiplyAccumulate<int8 -> float>`: `1.42x` 到 `1.86x`
+  - `SparseMatrixBatchVectorMultiplyAccumulate1x16<int8>`: `1.48x` 到 `1.76x`
+- 2026-05-06: 经过这轮补齐后，`rvv_tensor_utils.h` 中仍然直接走 portable 的公开 helper，已经和 `neon_tensor_utils.h` 保持一致；剩余差距主要不再是“有没有 RVV 入口”，而是“某些 helper 的 RVV 向量化深度和性能是否继续逼近 NEON”。
+- 2026-05-06: `CwiseMul<int16 -> int8>` 和 `VectorBatchVectorCwiseProductAccumulate<int16>` 的转折点不是外层循环，而是把 `MultiplyByQuantizedMultiplier` 这一段按 NEON 同层级补成了 RVV 精确 helper；其中还需要额外处理负数 `SaturatingRoundingDoublingHighMul` 的 truncating-divide 语义，否则会出现 `1 LSB` 级偏差。
+- 2026-05-06: 这轮共享 helper 覆盖已经直接影响 `fully_connected`、`conv`、`batch_matmul`、`svdf`、部分 recurrent/LSTM helper 等多类上层算子路径，比只优化单一 top-level kernel 更接近“尽可能多算子”的目标。
+- 2026-05-06: `2026-05-06 18:44:08 CST` 这一轮专门追了之前效果偏低的 5 条路径，并且都在 K3 上重新 build + benchmark 通过：
+  - `ApplyLayerNorm<int16>`：从此前约 `0.93x ~ 1.01x` 提升到 `2.47x ~ 2.84x`；关键变化是把 second pass 的 `shifted/rescaled/val3/val4/val5` 后处理链补成真正的 RVV 向量路径，而不再只是前半段做 reduction。
+  - `ApplySigmoid<int16>`：从此前约 `1.01x ~ 1.02x` 提升到 `54.27x ~ 104.65x`；当前采用的是 bit-exact LUT 快速路径，输出与 scalar 完全一致，但它本质上仍然不是像 NEON `gemmlowp::FixedPoint<int16x8_t>` 那样的原生 fixed-point RVV 向量实现。
+  - `ApplyTanh<int16>`：从此前约 `1.00x ~ 1.01x` 提升到 `58.79x ~ 96.48x`；策略和 `ApplySigmoid` 一样，也是 exact LUT 快速路径。
+  - `SparseMatrixBatchVectorMultiplyAccumulate<int8 -> float>`：从此前约 `1.42x ~ 1.86x` 提升到 `1.54x ~ 2.12x`；主要收益来自双累加器减少依赖链。
+  - `SparseMatrixBatchVectorMultiplyAccumulate1x16<int8>`：从此前约 `1.48x ~ 1.76x` 提升到 `2.10x ~ 3.36x`；主要收益来自 row sum 预计算移出 batch 循环，再配合双累加器减少 per-row 热路径开销。
+- 2026-05-07: source-level 第二梯队补齐继续沿 `tensor_utils` 主线推进，把此前仍直接走 `Portable*` 的公开 helper 也补上了 RVV 实现与 benchmark 入口，包括：
+  - `MatrixBatchVectorMultiply(const int8_t* ... -> int8_t*)`
+  - `MatrixBatchVectorMultiply(const int16_t* ... -> int8_t*)`
+  - `BatchVectorBatchVectorDotProduct<int16>`
+  - `ReductionSumVector<int32>`
+  - `TwoGateSaturatingAdd`
+  - `ApplyLayerNormFloat`
+  - `ApplySigmoidFloat`
+  - `ApplyTanhFloat`
+- 2026-05-07: 当前本地工作区缺少可直接使用的 RISC-V 交叉编译环境，以及 `public/gemmlowp.h` / `fixedpoint/fixedpoint.h` 这套宿主机侧可见依赖；因此这轮新增 helper 只完成了 source-level 接入与 benchmark case 补齐，最终仍需在 K3 上做真实编译、跑数与 RVV/scalar 记录回填。
+- 2026-05-07: `neon_tensor_utils.h` 对 `ApplyLayerNormFloat` 与 `ApplySigmoidFloat` 本身并没有 NEON 专门实现，而是直接回退到 `PortableApplyLayerNormFloat` / `PortableApplySigmoidFloat`；因此这两条路径在 RISC-V 上的后续优化目标，不应理解为“追平现成的 Neon float 内核”，而应拆成两类问题：
+  - `ApplySigmoidFloat`: 可以主动切到 RVV fixed-point logistic 路线，复用 Q3.12 的量化 sigmoid 近似。
+  - `ApplyLayerNormFloat`: 更适合保留 float 语义，但把 per-element 的 normalize / weight / bias / round / clamp 主循环向量化。
+- 2026-05-07: 算子级 RVV 已经开始从 `fully_connected` 切入：在 RVV 目标上，普通 float dense `FullyConnected` 的 generic optimized 路径被显式导向 `EvalPie` / `tensor_utils` 栈，而不再继续落到 generic `optimized_ops::FullyConnected` 的 GEMM 路径。这样做的目的不是“完全重写 top-level op”，而是让一个真实的 top-level 算子先直接吃到已经补齐的 RVV matvec / activation helper 收益；`svdf`、`lstm_eval`、hybrid `fully_connected` 本身已经大量依赖 `tensor_utils`，因此也适合作为同一批 operator-level RVV 的下一站。
+- 2026-05-07: 这轮继续把 operator-level RVV 往前推进了两步：
+  - `tflite/kernels/lstm_eval.cc` 中本地 float `MatrixBatchVectorMultiplyAccumulate` helper 在 RVV 目标上已经不再走 `optimized_ops::FullyConnected`，而是先拷贝累加初值，再直接切到 `tensor_utils::MatrixBatchVectorMultiplyAccumulate`。
+  - `tflite/kernels/internal/optimized/optimized_ops.h` 中 float 非 broadcast `Add` / `Mul` / `SubWithActivation` / `Div` 已补上 RVV 主循环；其中 `Add` / `Mul` 的 scalar-broadcast inner kernel 也补了 RVV 版本。
+- 2026-05-07: `2026-05-07 12:19:14 CST` 那一轮 operator benchmark 首次把 top-level float `add/mul/sub/div` 跑通了，但随后确认其中 `BroadcastAddDispatch<float>` / `BroadcastMulDispatch<float>` 的 `~1.00x` 结果是 benchmark 伪影，不能继续沿用。根因是同一 benchmark binary 同时链接 scalar/RVV 两套 header-inline weak symbol，而 `BinaryBroadcastFiveFold` 恰好又通过函数指针调用 `AddScalarBroadcast` / `MulSimpleBroadcast`，导致 RVV 侧可能被错误地绑定回 scalar 实现。
+- 2026-05-07: `2026-05-07 13:27:49 CST` 在 K3 上重新修正 operator benchmark 之后，最新 top-level / operator-level 结果为：
+  - `Add<float>` 非 broadcast: `4.08x ~ 5.85x`
+  - `AddScalarBroadcast<float>` direct kernel: `8.76x ~ 8.94x`
+  - `BroadcastAddDispatch<float>` scalar lhs: `7.28x ~ 8.80x`
+  - `Mul<float>` 非 broadcast: `4.02x ~ 5.39x`
+  - `MulSimpleBroadcast<float>` direct kernel: `7.96x ~ 8.01x`
+  - `BroadcastMulDispatch<float>` scalar lhs: `7.17x ~ 8.16x`
+  - `SubWithActivation<float>` 非 broadcast: `5.27x ~ 7.30x`
+  - `Div<float>` 非 broadcast: `1.99x ~ 2.00x`
+  - `LstmGate<float>` standalone operator bench: `3.10x ~ 3.85x`
+  - `LstmOutput<float>` standalone operator bench: `2.92x ~ 3.60x`
+  其中 broadcast 与 LSTM case 全部通过数值校验；LSTM gate 的最大 `max abs diff` 为 `6.0e-07`，LSTM output 的最大 `max abs diff` 为 `6.2e-06`。完整逐项数据见 `docs/rvv_operator_benchmarks.md`。
+- 2026-05-07: K3 上已经用真实 include 集再次对 `tflite/kernels/lstm_eval.cc` 和 `tflite/kernels/fully_connected.cc` 跑过 `g++ -fsyntax-only`，两者均通过；当前看到的只有 Eigen 的 deprecated warning，并没有新增由这轮 RVV 改动引入的语法错误。
+- 2026-05-08: `reduce.h` / `resize_bilinear.h` follow-up operator benchmark 已在 K3 上重新 build + run 完成，结果已回填到 `docs/rvv_operator_benchmarks.md` 与 `docs/rvv_scalar_benchmarks.md`。
+- 2026-05-08: 这轮新补的两类算子实测结论比较明确：
+  - `MeanImpl<uint8>`：`1.26x ~ 1.62x`，`max_abs_diff=0`
+  - `Mean<float>` last-dim：`1.82x ~ 1.85x`（中大 shape），`max_abs_diff<=2.4e-7`
+  - `ResizeBilinear<uint8>` generic-small-channel：`2.04x ~ 2.20x`，`max_abs_diff=0`
+  - `ResizeBilinear<float>` generic operator path：结果数值完全一致，但整体 speedup 基本约 `1.00x`
+- 2026-05-08: `ResizeBilinear<float>` 之所以在当前 operator-level benchmark 上几乎不显示提速，不代表新增 RVV depth kernel 没有生效；更可能的原因是整个 top-level generic bilinear 路径里，`ComputeInterpolationValues` 和外围坐标/loop 调度仍占了较大比例，导致 depth 向量乘加的收益被整体算子开销稀释。

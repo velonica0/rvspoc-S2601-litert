@@ -35,6 +35,15 @@ NEON_FLAGS_IF_APPLICABLE = select({
     ],
 })
 
+RVV_FLAGS_IF_APPLICABLE = select({
+    ":riscv64": [
+        "-O3",
+        "-march=rv64gcv_zvl128b",
+        "-mabi=lp64d",
+    ],
+    "//conditions:default": [],
+})
+
 filegroup(
     name = "tflite_internal_cc_3p_api_deps_src",
     srcs = ["compatibility.h"],
@@ -120,6 +129,13 @@ config_setting(
     name = "x86_64",
     constraint_values = [
         "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "riscv64",
+    constraint_values = [
+        "@platforms//cpu:riscv64",
     ],
 )
 
@@ -806,14 +822,18 @@ cc_library(
 cc_library(
     name = "portable_tensor_utils",
     srcs = [
+        "optimized/rvv_tensor_utils.cc",
         "reference/portable_tensor_utils.cc",
     ],
     hdrs = [
+        "optimized/rvv_check.h",
+        "optimized/rvv_tensor_utils.h",
+        "optimized/rvv_tensor_utils_impl.h",
         "reference/portable_tensor_utils.h",
         "reference/portable_tensor_utils_impl.h",
     ],
     compatible_with = get_compatible_with_portable(),
-    copts = tflite_copts(),
+    copts = tflite_copts() + RVV_FLAGS_IF_APPLICABLE,
     deps = [
         ":common",
         ":compatibility",
@@ -973,7 +993,7 @@ cc_library(
         "tensor_utils.h",
     ],
     compatible_with = get_compatible_with_portable(),
-    copts = tflite_copts() + NEON_FLAGS_IF_APPLICABLE,
+    copts = tflite_copts() + NEON_FLAGS_IF_APPLICABLE + RVV_FLAGS_IF_APPLICABLE,
     deps = [
         ":cpu_check",
         ":tensor_utils_no_eigen",
