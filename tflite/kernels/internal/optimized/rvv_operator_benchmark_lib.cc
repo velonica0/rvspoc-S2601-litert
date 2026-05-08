@@ -21,11 +21,14 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/mean.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mul.h"
 #include "tflite/kernels/internal/optimized/integer_ops/pooling.h"
+#include "tflite/kernels/internal/optimized/reduce.h"
+#include "tflite/kernels/internal/optimized/resize_bilinear.h"
 #include "tflite/kernels/internal/optimized/integer_ops/sub.h"
 
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <vector>
 
 namespace {
 
@@ -562,6 +565,53 @@ void MeanInt8OperatorImpl(int batches, int input_height, int input_width,
                                           /*end_depth=*/depth);
 }
 
+void MeanUint8OperatorImpl(int batches, int input_height, int input_width,
+                           int depth, const uint8_t* input, uint8_t* output) {
+  const int area = input_height * input_width;
+  TFLITE_CHECK_GT(area, 0);
+  TFLITE_CHECK_EQ(area & (area - 1), 0);
+  int log2_area = 0;
+  for (int value = area; value > 1; value >>= 1) {
+    ++log2_area;
+  }
+
+  tflite::MeanParams params{};
+  params.axis_count = 2;
+  params.axis[0] = 1;
+  params.axis[1] = 2;
+
+  const int32_t multiplier = 1 << 30;
+  const int shift = 1 - log2_area;
+  const int32_t bias = 0;
+  const tflite::RuntimeShape input_shape(
+      {batches, input_height, input_width, depth});
+  const tflite::RuntimeShape output_shape({batches, 1, 1, depth});
+  tflite::optimized_ops::MeanImpl(params, input_shape, input, multiplier,
+                                  shift, bias, output_shape, output,
+                                  /*start_depth=*/0,
+                                  /*end_depth=*/depth);
+}
+
+void MeanFloatLastDimOperatorImpl(int rows, int cols, const float* input,
+                                  float* output) {
+  TFLITE_CHECK_GT(rows, 0);
+  TFLITE_CHECK_GT(cols, 0);
+
+  const int input_dims[] = {rows, cols};
+  const int output_dims[] = {rows};
+  const int axis[] = {1};
+  int normalized_dims[2] = {0, 0};
+  int resolved_axis[1] = {0};
+  std::vector<float> temp_sum(rows, 0.0f);
+
+  if (!tflite::optimized_ops::Mean<float, float>(
+          input, input_dims, 2, output, output_dims, 1, axis, 1,
+          /*keep_dims=*/false, normalized_dims, resolved_axis,
+          temp_sum.data())) {
+    std::abort();
+  }
+}
+
 void FullyConnectedFloatOperatorImpl(int n_batch, int input_size, int num_units,
                                      const float* input, const float* weights,
                                      const float* bias, float* output) {
@@ -710,6 +760,48 @@ void MaxPoolInt8OperatorImpl(int batches, int input_height, int input_width,
       {batches, output_height, output_width, depth});
   tflite::optimized_integer_ops::MaxPool(params, input_shape, input,
                                          output_shape, output);
+}
+
+void ResizeBilinearFloatOperatorImpl(int batches, int input_height,
+                                     int input_width, int depth,
+                                     int output_height, int output_width,
+                                     bool align_corners,
+                                     bool half_pixel_centers,
+                                     const float* input, float* output) {
+  tflite::ResizeBilinearParams params{};
+  params.align_corners = align_corners;
+  params.half_pixel_centers = half_pixel_centers;
+
+  const tflite::RuntimeShape input_shape(
+      {batches, input_height, input_width, depth});
+  const tflite::RuntimeShape output_size_shape({2});
+  const int32_t output_size_data[2] = {output_height, output_width};
+  const tflite::RuntimeShape output_shape(
+      {batches, output_height, output_width, depth});
+  tflite::optimized_ops::ResizeBilinear(params, input_shape, input,
+                                        output_size_shape, output_size_data,
+                                        output_shape, output);
+}
+
+void ResizeBilinearUint8OperatorImpl(int batches, int input_height,
+                                     int input_width, int depth,
+                                     int output_height, int output_width,
+                                     bool align_corners,
+                                     bool half_pixel_centers,
+                                     const uint8_t* input, uint8_t* output) {
+  tflite::ResizeBilinearParams params{};
+  params.align_corners = align_corners;
+  params.half_pixel_centers = half_pixel_centers;
+
+  const tflite::RuntimeShape input_shape(
+      {batches, input_height, input_width, depth});
+  const tflite::RuntimeShape output_size_shape({2});
+  const int32_t output_size_data[2] = {output_height, output_width};
+  const tflite::RuntimeShape output_shape(
+      {batches, output_height, output_width, depth});
+  tflite::optimized_ops::ResizeBilinear(params, input_shape, input,
+                                        output_size_shape, output_size_data,
+                                        output_shape, output);
 }
 
 void DepthwiseConvInt8OperatorImpl(
@@ -1036,6 +1128,37 @@ extern "C" void RvvMeanInt8Operator(int batches, int input_height,
                        output);
 }
 
+extern "C" void RvvMeanUint8Operator(int batches, int input_height,
+                                     int input_width, int depth,
+                                     const uint8_t* input, uint8_t* output) {
+  MeanUint8OperatorImpl(batches, input_height, input_width, depth, input,
+                        output);
+}
+
+extern "C" void RvvMeanFloatLastDimOperator(int rows, int cols,
+                                            const float* input,
+                                            float* output) {
+  MeanFloatLastDimOperatorImpl(rows, cols, input, output);
+}
+
+extern "C" void RvvResizeBilinearFloatOperator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const float* input, float* output) {
+  ResizeBilinearFloatOperatorImpl(
+      batches, input_height, input_width, depth, output_height, output_width,
+      align_corners, half_pixel_centers, input, output);
+}
+
+extern "C" void RvvResizeBilinearUint8Operator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const uint8_t* input, uint8_t* output) {
+  ResizeBilinearUint8OperatorImpl(
+      batches, input_height, input_width, depth, output_height, output_width,
+      align_corners, half_pixel_centers, input, output);
+}
+
 extern "C" int RvvArgMinFloatOperator(const float* input, int size) {
   return ArgMinFloatOperatorImpl(input, size);
 }
@@ -1293,6 +1416,38 @@ extern "C" void ScalarMeanInt8Operator(int batches, int input_height,
                                        const int8_t* input, int8_t* output) {
   MeanInt8OperatorImpl(batches, input_height, input_width, depth, input,
                        output);
+}
+
+extern "C" void ScalarMeanUint8Operator(int batches, int input_height,
+                                        int input_width, int depth,
+                                        const uint8_t* input,
+                                        uint8_t* output) {
+  MeanUint8OperatorImpl(batches, input_height, input_width, depth, input,
+                        output);
+}
+
+extern "C" void ScalarMeanFloatLastDimOperator(int rows, int cols,
+                                               const float* input,
+                                               float* output) {
+  MeanFloatLastDimOperatorImpl(rows, cols, input, output);
+}
+
+extern "C" void ScalarResizeBilinearFloatOperator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const float* input, float* output) {
+  ResizeBilinearFloatOperatorImpl(
+      batches, input_height, input_width, depth, output_height, output_width,
+      align_corners, half_pixel_centers, input, output);
+}
+
+extern "C" void ScalarResizeBilinearUint8Operator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const uint8_t* input, uint8_t* output) {
+  ResizeBilinearUint8OperatorImpl(
+      batches, input_height, input_width, depth, output_height, output_width,
+      align_corners, half_pixel_centers, input, output);
 }
 
 extern "C" int ScalarArgMinFloatOperator(const float* input, int size) {

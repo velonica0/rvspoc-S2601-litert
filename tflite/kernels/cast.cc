@@ -25,6 +25,7 @@ limitations under the License.
 #include "tflite/core/c/common.h"
 #include "tflite/core/subgraph.h"
 #include "tflite/interpreter_options.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/tensor_ctypes.h"
 #include "tflite/kernels/kernel_util.h"
@@ -46,11 +47,42 @@ namespace {
 constexpr int kInputTensor = 0;
 constexpr int kOutputTensor = 0;
 
+#ifdef USE_RVV
+inline void StoreInt16FromInt32(vint32m2_t values, int16_t* data, size_t vl) {
+  const vint16m1_t narrowed = __riscv_vnsra_wx_i16m1(values, 0, vl);
+  __riscv_vse16_v_i16m1(data, narrowed, vl);
+}
+
+inline void StoreUInt8FromInt32(vint32m2_t values, uint8_t* data, size_t vl) {
+  const vint32m2_t correction =
+      __riscv_vsll_vx_i32m2(__riscv_vsra_vx_i32m2(values, 7, vl), 8, vl);
+  values = __riscv_vsub_vv_i32m2(values, correction, vl);
+  const vint16m1_t narrowed16 = __riscv_vnsra_wx_i16m1(values, 0, vl);
+  const vint8mf2_t narrowed8 = __riscv_vnsra_wx_i8mf2(narrowed16, 0, vl);
+  __riscv_vse8_v_u8mf2(data, __riscv_vreinterpret_v_i8mf2_u8mf2(narrowed8),
+                       vl);
+}
+#endif
+
 void copyCast(const float* in, int32_t* out, int num_elements) {
   const float min_int_float =
       static_cast<float>(std::numeric_limits<int32_t>::min());
   const float max_int_float = std::nextafterf(
       static_cast<float>(std::numeric_limits<int32_t>::max()), 0);
+
+#ifdef USE_RVV
+  int i = 0;
+  for (; i < num_elements;) {
+    const size_t vl = __riscv_vsetvl_e32m4(num_elements - i);
+    vfloat32m4_t values = __riscv_vle32_v_f32m4(in + i, vl);
+    values = __riscv_vfmax_vf_f32m4(values, min_int_float, vl);
+    values = __riscv_vfmin_vf_f32m4(values, max_int_float, vl);
+    const vint32m4_t converted = __riscv_vfcvt_rtz_x_f_v_i32m4(values, vl);
+    __riscv_vse32_v_i32m4(out + i, converted, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
 
   std::transform(in, in + num_elements, out, [=](float a) {
     return a <= max_int_float ? static_cast<int32_t>(std::max(a, min_int_float))
@@ -63,6 +95,19 @@ void copyCast(const float* in, int16_t* out, int num_elements) {
       static_cast<float>(std::numeric_limits<int16_t>::min());
   const float max_int_float =
       static_cast<float>(std::numeric_limits<int16_t>::max());
+#ifdef USE_RVV
+  int i = 0;
+  for (; i < num_elements;) {
+    const size_t vl = __riscv_vsetvl_e32m2(num_elements - i);
+    vfloat32m2_t values = __riscv_vle32_v_f32m2(in + i, vl);
+    values = __riscv_vfmax_vf_f32m2(values, min_int_float, vl);
+    values = __riscv_vfmin_vf_f32m2(values, max_int_float, vl);
+    const vint32m2_t converted = __riscv_vfcvt_rtz_x_f_v_i32m2(values, vl);
+    StoreInt16FromInt32(converted, out + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
   std::transform(in, in + num_elements, out, [=](float a) {
     return static_cast<int16_t>(
         std::max(std::min(a, max_int_float), min_int_float));
@@ -74,6 +119,19 @@ void copyCast(const float* in, uint8_t* out, int num_elements) {
       static_cast<float>(std::numeric_limits<uint8_t>::min());
   const float max_int_float =
       static_cast<float>(std::numeric_limits<uint8_t>::max());
+#ifdef USE_RVV
+  int i = 0;
+  for (; i < num_elements;) {
+    const size_t vl = __riscv_vsetvl_e32m2(num_elements - i);
+    vfloat32m2_t values = __riscv_vle32_v_f32m2(in + i, vl);
+    values = __riscv_vfmax_vf_f32m2(values, min_int_float, vl);
+    values = __riscv_vfmin_vf_f32m2(values, max_int_float, vl);
+    const vint32m2_t converted = __riscv_vfcvt_rtz_x_f_v_i32m2(values, vl);
+    StoreUInt8FromInt32(converted, out + i, vl);
+    i += static_cast<int>(vl);
+  }
+  return;
+#endif
   std::transform(in, in + num_elements, out, [=](float a) {
     return static_cast<uint8_t>(
         std::max(std::min(a, max_int_float), min_int_float));

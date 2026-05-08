@@ -140,6 +140,21 @@ extern "C" void ScalarLookupTableInt8Operator(int size, const int8_t* input,
 extern "C" void ScalarMeanInt8Operator(int batches, int input_height,
                                        int input_width, int depth,
                                        const int8_t* input, int8_t* output);
+extern "C" void ScalarMeanUint8Operator(int batches, int input_height,
+                                        int input_width, int depth,
+                                        const uint8_t* input,
+                                        uint8_t* output);
+extern "C" void ScalarMeanFloatLastDimOperator(int rows, int cols,
+                                               const float* input,
+                                               float* output);
+extern "C" void ScalarResizeBilinearFloatOperator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const float* input, float* output);
+extern "C" void ScalarResizeBilinearUint8Operator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const uint8_t* input, uint8_t* output);
 extern "C" int ScalarArgMinFloatOperator(const float* input, int size);
 extern "C" int ScalarArgMaxFloatOperator(const float* input, int size);
 extern "C" int ScalarArgMaxInt8Operator(const int8_t* input, int size);
@@ -251,6 +266,20 @@ extern "C" void RvvLookupTableInt8Operator(int size, const int8_t* input,
 extern "C" void RvvMeanInt8Operator(int batches, int input_height,
                                     int input_width, int depth,
                                     const int8_t* input, int8_t* output);
+extern "C" void RvvMeanUint8Operator(int batches, int input_height,
+                                     int input_width, int depth,
+                                     const uint8_t* input, uint8_t* output);
+extern "C" void RvvMeanFloatLastDimOperator(int rows, int cols,
+                                            const float* input,
+                                            float* output);
+extern "C" void RvvResizeBilinearFloatOperator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const float* input, float* output);
+extern "C" void RvvResizeBilinearUint8Operator(
+    int batches, int input_height, int input_width, int depth,
+    int output_height, int output_width, bool align_corners,
+    bool half_pixel_centers, const uint8_t* input, uint8_t* output);
 extern "C" int RvvArgMinFloatOperator(const float* input, int size);
 extern "C" int RvvArgMaxFloatOperator(const float* input, int size);
 extern "C" int RvvArgMaxInt8Operator(const int8_t* input, int size);
@@ -437,6 +466,12 @@ bool FloatAccuracyWithinMatVecTolerance(const FloatAccuracy& accuracy) {
   return accuracy.max_abs_diff <= 1.0e-4f ||
          (accuracy.max_abs_diff <= 2.0e-4f &&
           accuracy.mean_abs_diff <= 2.0e-5);
+}
+
+bool FloatAccuracyWithinCodeXOperatorTolerance(const FloatAccuracy& accuracy) {
+  return accuracy.max_abs_diff <= 1.0e-5f ||
+         (accuracy.max_rel_diff <= 1.0e-5f &&
+          accuracy.mean_abs_diff <= 1.0e-6);
 }
 
 bool IntegerAccuracyWithinTolerance(const IntegerAccuracy& accuracy,
@@ -1141,6 +1176,8 @@ void BenchmarkIndexOp(const char* title, const char* affects,
 }  // namespace
 
 #include "tflite/kernels/internal/optimized/rvv_operator_benchmark_optimized_ops.inc"
+#include "tflite/kernels/internal/optimized/rvv_operator_benchmark_reduce.inc"
+#include "tflite/kernels/internal/optimized/rvv_operator_benchmark_resize_bilinear.inc"
 #include "tflite/kernels/internal/optimized/rvv_operator_benchmark_fully_connected.inc"
 #include "tflite/kernels/internal/optimized/rvv_operator_benchmark_lstm_eval.inc"
 #include "tflite/kernels/internal/optimized/rvv_operator_benchmark_integer_add.inc"
@@ -1153,15 +1190,20 @@ void BenchmarkIndexOp(const char* title, const char* affects,
 #include "tflite/kernels/internal/optimized/rvv_operator_benchmark_integer_mean.inc"
 
 int main() {
-  std::cout << "# RVV vs Scalar: Recent five-commit RVV coverage\n\n";
+  std::cout << "# RVV vs Scalar: Operator-level RVV coverage\n\n";
   std::cout << "- Scalar kernels: same wrapper compiled with "
                "`-fno-tree-vectorize -fno-tree-slp-vectorize`\n";
   std::cout << "- RVV kernels: same wrapper compiled with "
                "`-march=rv64gcv_zvl128b -mabi=lp64d`\n";
-  std::cout << "- Organization: benchmark sections are now split by the source "
-               "file that gained RVV coverage in the latest five commits.\n\n";
+  std::cout << "- Organization: benchmark sections are split by the source "
+               "file that owns the RVV path.\n";
+  std::cout << "- Scope: includes the earlier recent-five-commit operator "
+               "set plus follow-up P1 gap closures for `reduce.h` and "
+               "`resize_bilinear.h`.\n\n";
 
   RunOptimizedOpsBenchmarks();
+  RunReduceBenchmarks();
+  RunResizeBilinearBenchmarks();
   RunFullyConnectedBenchmarks();
   RunLstmEvalBenchmarks();
   RunIntegerAddBenchmarks();

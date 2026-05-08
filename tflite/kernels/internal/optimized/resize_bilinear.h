@@ -28,6 +28,7 @@ limitations under the License.
 #include "tflite/core/c/common.h"
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/compatibility.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/tensor.h"
@@ -37,6 +38,28 @@ limitations under the License.
 namespace tflite {
 namespace optimized_ops {
 namespace resize_bilinear {
+
+#ifdef USE_RVV
+inline vint16m1_t RvvResizeLoadUInt8AsInt16(const uint8_t* data, size_t vl) {
+  const vuint8mf2_t bytes = __riscv_vle8_v_u8mf2(data, vl);
+  vint16m1_t values =
+      __riscv_vwadd_vx_i16m1(__riscv_vreinterpret_v_u8mf2_i8mf2(bytes), 0, vl);
+  const vint16m1_t correction =
+      __riscv_vand_vx_i16m1(__riscv_vsra_vx_i16m1(values, 15, vl), 256, vl);
+  return __riscv_vadd_vv_i16m1(values, correction, vl);
+}
+
+inline void RvvResizeStoreUInt8FromInt32(vint32m2_t values, uint8_t* data,
+                                         size_t vl) {
+  const vint32m2_t correction =
+      __riscv_vsll_vx_i32m2(__riscv_vsra_vx_i32m2(values, 7, vl), 8, vl);
+  values = __riscv_vsub_vv_i32m2(values, correction, vl);
+  const vint16m1_t narrowed16 = __riscv_vnsra_wx_i16m1(values, 0, vl);
+  const vint8mf2_t narrowed8 = __riscv_vnsra_wx_i8mf2(narrowed16, 0, vl);
+  __riscv_vse8_v_u8mf2(data, __riscv_vreinterpret_v_i8mf2_u8mf2(narrowed8),
+                       vl);
+}
+#endif
 
 #ifdef USE_NEON
 // These utility functions are split off not just for convenience. Most
@@ -1312,6 +1335,20 @@ inline void ResizeBilinearKernel(const float* input_ptr, int32_t depth,
     input_ptr++;
   }
 }
+#elif defined(USE_RVV)
+inline void ResizeBilinearKernel(const float* input_ptr, int32_t depth,
+                                 float scale, float* output_ptr) {
+  int32_t ic = 0;
+  for (; ic < depth;) {
+    const size_t vl = __riscv_vsetvl_e32m4(depth - ic);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_ptr + ic, vl);
+    vfloat32m4_t acc = __riscv_vle32_v_f32m4(output_ptr + ic, vl);
+    acc = __riscv_vfadd_vv_f32m4(acc, __riscv_vfmul_vf_f32m4(input, scale, vl),
+                                 vl);
+    __riscv_vse32_v_f32m4(output_ptr + ic, acc, vl);
+    ic += static_cast<int32_t>(vl);
+  }
+}
 #else
 inline void ResizeBilinearKernel(const float* input_ptr, int32 depth,
                                  float scale, float* output_ptr) {
@@ -1594,6 +1631,56 @@ inline void ResizeBilinearGenericSmallChannel(
                           (input_y - y0) * (1 - (input_x - x0)),
                           (input_y - y0) * (input_x - x0)};
 
+#ifdef USE_RVV
+        if constexpr (std::is_same<T, uint8_t>::value) {
+          int d = 0;
+          for (; d < depth;) {
+            const size_t vl = __riscv_vsetvl_e8mf2(depth - d);
+            const vint16m1_t input0 =
+                resize_bilinear::RvvResizeLoadUInt8AsInt16(
+                    input_data + input_offset[0] + d, vl);
+            const vint16m1_t input1 =
+                resize_bilinear::RvvResizeLoadUInt8AsInt16(
+                    input_data + input_offset[1] + d, vl);
+            const vint16m1_t input2 =
+                resize_bilinear::RvvResizeLoadUInt8AsInt16(
+                    input_data + input_offset[2] + d, vl);
+            const vint16m1_t input3 =
+                resize_bilinear::RvvResizeLoadUInt8AsInt16(
+                    input_data + input_offset[3] + d, vl);
+            const vfloat32m2_t value0 = __riscv_vfcvt_f_x_v_f32m2(
+                __riscv_vwadd_vx_i32m2(input0, 0, vl), vl);
+            const vfloat32m2_t value1 = __riscv_vfcvt_f_x_v_f32m2(
+                __riscv_vwadd_vx_i32m2(input1, 0, vl), vl);
+            const vfloat32m2_t value2 = __riscv_vfcvt_f_x_v_f32m2(
+                __riscv_vwadd_vx_i32m2(input2, 0, vl), vl);
+            const vfloat32m2_t value3 = __riscv_vfcvt_f_x_v_f32m2(
+                __riscv_vwadd_vx_i32m2(input3, 0, vl), vl);
+
+            vfloat32m2_t acc = __riscv_vfmul_vf_f32m2(value0, scale[0], vl);
+            acc = __riscv_vfadd_vv_f32m2(
+                acc, __riscv_vfmul_vf_f32m2(value1, scale[1], vl), vl);
+            acc = __riscv_vfadd_vv_f32m2(
+                acc, __riscv_vfmul_vf_f32m2(value2, scale[2], vl), vl);
+            acc = __riscv_vfadd_vv_f32m2(
+                acc,
+                __riscv_vfadd_vf_f32m2(
+                    __riscv_vfmul_vf_f32m2(value3, scale[3], vl),
+                    rounding_offset, vl),
+                vl);
+
+            vint32m2_t rounded = __riscv_vfcvt_rtz_x_f_v_i32m2(acc, vl);
+            rounded = __riscv_vmax_vx_i32m2(rounded, 0, vl);
+            rounded = __riscv_vmin_vx_i32m2(
+                rounded, std::numeric_limits<uint8_t>::max(), vl);
+            resize_bilinear::RvvResizeStoreUInt8FromInt32(rounded, output_ptr,
+                                                          vl);
+            output_ptr += vl;
+            d += static_cast<int>(vl);
+          }
+          continue;
+        }
+#endif
         for (int d = 0; d < depth; d++) {
           const T* input_ptr = &input_data[d];
           *output_ptr++ = static_cast<T>(input_ptr[input_offset[0]] * scale[0] +

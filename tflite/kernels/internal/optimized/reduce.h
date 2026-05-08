@@ -19,12 +19,14 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
 #include "tflite/kernels/internal/optimized/reduce_utils.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reduce_common.h"
 #include "tflite/kernels/internal/reference/reduce.h"
 #include "tflite/kernels/internal/runtime_shape.h"
@@ -33,6 +35,17 @@ limitations under the License.
 
 namespace tflite {
 namespace optimized_ops {
+
+#ifdef USE_RVV
+inline vint16m1_t RvvReduceLoadUInt8AsInt16(const uint8_t* data, size_t vl) {
+  const vuint8mf2_t bytes = __riscv_vle8_v_u8mf2(data, vl);
+  vint16m1_t values =
+      __riscv_vwadd_vx_i16m1(__riscv_vreinterpret_v_u8mf2_i8mf2(bytes), 0, vl);
+  const vint16m1_t correction =
+      __riscv_vand_vx_i16m1(__riscv_vsra_vx_i16m1(values, 15, vl), 256, vl);
+  return __riscv_vadd_vv_i16m1(values, correction, vl);
+}
+#endif
 
 inline void MeanImpl(const tflite::MeanParams& op_params,
                      const RuntimeShape& input_shape, const uint8_t* input_data,
@@ -63,6 +76,10 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
   const int32x4_t min_dup = vdupq_n_s32(kMinValue);
   const int32x4_t max_dup = vdupq_n_s32(kMaxValue);
 #endif  // USE_NEON
+#ifdef USE_RVV
+  const size_t max_vl = __riscv_vsetvlmax_e8mf2();
+  std::unique_ptr<int32_t[]> sum_buffer(new int32_t[max_vl]);
+#endif
 
   for (int out_b = 0; out_b < output_batch; ++out_b) {
     int out_d = start_depth;
@@ -138,6 +155,34 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
       vst1q_u8(output_data_ptr, combined_output);
     }
 #endif  // USE_NEON
+#ifdef USE_RVV
+    for (; out_d < end_depth;) {
+      const size_t vl = __riscv_vsetvl_e8mf2(end_depth - out_d);
+      vint32m2_t temp_sum = __riscv_vmv_v_x_i32m2(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const uint8_t* input_data_ptr =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          const vint16m1_t input16 =
+              RvvReduceLoadUInt8AsInt16(input_data_ptr, vl);
+          temp_sum = __riscv_vadd_vv_i32m2(
+              temp_sum, __riscv_vwadd_vx_i32m2(input16, 0, vl), vl);
+        }
+      }
+
+      __riscv_vse32_v_i32m2(sum_buffer.get(), temp_sum, vl);
+      uint8_t* output_data_ptr =
+          output_data + Offset(output_shape, out_b, 0, 0, out_d);
+      for (size_t lane = 0; lane < vl; ++lane) {
+        int32_t acc =
+            MultiplyByQuantizedMultiplier(sum_buffer[lane], multiplier, shift);
+        acc += bias;
+        acc = std::min(std::max(acc, kMinValue), kMaxValue);
+        output_data_ptr[lane] = static_cast<uint8_t>(acc);
+      }
+      out_d += static_cast<int>(vl);
+    }
+#endif
 
     for (; out_d < end_depth; ++out_d) {
       int acc = 0;
@@ -762,6 +807,25 @@ inline bool Mean<float, float>(const float* input_data, const int* input_dims,
     ruy::profiler::ScopeLabel label("MeanLastDim/Float");
     int output_size = normalized_dims[0];
     const int last_input_dim = normalized_dims[1];
+
+#ifdef USE_RVV
+    for (int row = 0; row < output_size; ++row) {
+      const float* row_input = input_data + row * last_input_dim;
+      float sum = 0.0f;
+      for (int col = 0; col < last_input_dim;) {
+        const size_t vl = __riscv_vsetvl_e32m4(last_input_dim - col);
+        const vfloat32m4_t values =
+            __riscv_vle32_v_f32m4(row_input + col, vl);
+        const vfloat32m1_t sum_vec = __riscv_vle32_v_f32m1(&sum, 1);
+        const vfloat32m1_t reduced =
+            __riscv_vfredusum_vs_f32m4_f32m1(values, sum_vec, vl);
+        sum = __riscv_vfmv_f_s_f32m1_f32(reduced);
+        col += static_cast<int>(vl);
+      }
+      output_data[row] = sum / static_cast<float>(last_input_dim);
+    }
+    return true;
+#endif
 
     // TODO(b/152563685): Consider use eigen to cover more general cases.
     const MatrixMap<const float> in_mat(input_data, last_input_dim,

@@ -6495,7 +6495,18 @@ inline void ResizeNearestNeighbor(
         TFLITE_DCHECK_LT(x * input_width, output_width + in_x * output_width);
         TFLITE_DCHECK_GE(x * input_width, in_x * output_width);
         const uint8_t* x_input_ptr = y_input_ptr + in_x * col_offset;
+#ifdef USE_RVV
+        int c = 0;
+        for (; c < depth;) {
+          const size_t vl = __riscv_vsetvl_e8mf2(depth - c);
+          const vuint8mf2_t values =
+              __riscv_vle8_v_u8mf2(x_input_ptr + c, vl);
+          __riscv_vse8_v_u8mf2(output_ptr + c, values, vl);
+          c += static_cast<int>(vl);
+        }
+#else
         memcpy(output_ptr, x_input_ptr, depth);
+#endif
         output_ptr += depth;
       }
     }
