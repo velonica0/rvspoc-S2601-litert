@@ -22,6 +22,7 @@ limitations under the License.
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/optimized/cpu_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/optimized/depthwiseconv_3x3_filter_common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv.h"
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv_hybrid_3x3_filter.h"
@@ -234,6 +235,24 @@ static void DoDepthwiseConvHybridGeneral(
               float_acc = vminq_f32(float_acc, output_activation_max_vec);
               vst1q_f32(output_ptr + loc, float_acc);
             }
+          }
+#elif defined(USE_RVV)
+          for (; c < output_depth;) {
+            size_t vl = __riscv_vsetvl_e32m4(output_depth - c);
+            vfloat32m4_t ch_scale = __riscv_vle32_v_f32m4(per_channel_scales + c, vl);
+            vfloat32m4_t bias_v = __riscv_vle32_v_f32m4(bias_data + c, vl);
+            ch_scale = __riscv_vfmul_vf_f32m4(ch_scale, input_scale, vl);
+            for (int n = 0; n < num_output_pixels; ++n) {
+              int loc = n * output_depth + c;
+              vint32m4_t acc = __riscv_vle32_v_i32m4(acc_buffer + loc, vl);
+              vfloat32m4_t facc = __riscv_vfcvt_f_x_v_f32m4(acc, vl);
+              facc = __riscv_vfmul_vv_f32m4(facc, ch_scale, vl);
+              facc = __riscv_vfadd_vv_f32m4(facc, bias_v, vl);
+              facc = __riscv_vfmax_vf_f32m4(facc, output_activation_min, vl);
+              facc = __riscv_vfmin_vf_f32m4(facc, output_activation_max, vl);
+              __riscv_vse32_v_f32m4(output_ptr + loc, facc, vl);
+            }
+            c += vl;
           }
 #endif  // USE_NEON
 

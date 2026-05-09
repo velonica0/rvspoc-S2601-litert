@@ -1738,7 +1738,7 @@ inline void DepthwiseConvGeneral(
   const int filter_width = filter_shape.Dims(2);
   const int output_height = output_shape.Dims(1);
   const int output_width = output_shape.Dims(2);
-#ifdef USE_NEON
+#if defined(USE_NEON)
   const bool shift_left = (output_shift > 0);
   const int32_t multiplier_power_of_two = shift_left ? (1 << output_shift) : 1;
 #endif

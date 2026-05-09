@@ -2118,7 +2118,7 @@ inline void FullyConnected(
     int8_t* output_data, gemmlowp::GemmContext* gemmlowp_context) {
   ruy::profiler::ScopeLabel label("FullyConnectedInt8/8bit");
 
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   const int32_t input_offset = params.input_offset;
   const int32_t filter_offset = params.weights_offset;
   const int32_t output_offset = params.output_offset;
@@ -2147,7 +2147,7 @@ inline void FullyConnected(
           output_activation_max, output_shape, output_data, gemmlowp_context);
     }
   }
-#endif  // USE_NEON
+#endif  // USE_NEON || USE_RVV
 
 #ifdef GEMMLOWP_NEON
   const int filter_rows = filter_shape.Dims(filter_dim_count - 2);
@@ -2707,7 +2707,7 @@ inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
   TFLITE_DCHECK_EQ(filter_cols, gemm_input_rows);
   TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_rows);
 
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   if (gemm_input_cols == 1 && output_rows >= 4) {
     RuntimeShape fc_filter_shape{
         filter_shape.Dims(0),
