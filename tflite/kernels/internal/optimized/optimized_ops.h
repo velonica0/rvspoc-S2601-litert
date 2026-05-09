@@ -55,6 +55,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/im2col_utils.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
 #include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
+#include "tflite/kernels/internal/optimized/rvv_quantization_utils.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/strided_slice_logic.h"
@@ -1515,6 +1516,17 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
     x = vminq_f32(activation_max, x);
     vst1q_f32(output_data + i, x);
   }
+#elif defined(USE_RVV)
+  for (; i < size;) {
+    size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t a1 = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t a2 = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t x = __riscv_vfadd_vv_f32m4(a1, a2, vl);
+    x = __riscv_vfmax_vf_f32m4(x, params.float_activation_min, vl);
+    x = __riscv_vfmin_vf_f32m4(x, params.float_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, x, vl);
+    i += vl;
+  }
 #endif  // NEON
 
   for (; i < size; i++) {
@@ -1599,6 +1611,37 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
         vmax_u8(output_activation_min_vector,
                 vmin_u8(output_activation_max_vector, vqmovun_s16(s)));
     vst1_u8(output_data + i, clamped);
+  }
+#elif defined(USE_RVV)
+  const int input1_left_shift = params.left_shift + params.input1_shift;
+  const int input2_left_shift = params.left_shift + params.input2_shift;
+  for (; i < size;) {
+    size_t vl = __riscv_vsetvl_e8m1(size - i);
+    vuint8m1_t v1_u8 = __riscv_vle8_v_u8m1(input1_data + i, vl);
+    vuint8m1_t v2_u8 = __riscv_vle8_v_u8m1(input2_data + i, vl);
+    vuint16m2_t v1_u16 = __riscv_vzext_vf2_u16m2(v1_u8, vl);
+    vuint16m2_t v2_u16 = __riscv_vzext_vf2_u16m2(v2_u8, vl);
+    vint16m2_t v1_s16 = __riscv_vreinterpret_v_u16m2_i16m2(v1_u16);
+    vint16m2_t v2_s16 = __riscv_vreinterpret_v_u16m2_i16m2(v2_u16);
+    v1_s16 = __riscv_vadd_vx_i16m2(v1_s16, params.input1_offset, vl);
+    v2_s16 = __riscv_vadd_vx_i16m2(v2_s16, params.input2_offset, vl);
+    vint32m4_t x1 = __riscv_vsext_vf2_i32m4(v1_s16, vl);
+    vint32m4_t x2 = __riscv_vsext_vf2_i32m4(v2_s16, vl);
+    x1 = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+        x1, params.input1_multiplier, input1_left_shift, vl);
+    x2 = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+        x2, params.input2_multiplier, input2_left_shift, vl);
+    vint32m4_t sum = __riscv_vadd_vv_i32m4(x1, x2, vl);
+    sum = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+        sum, params.output_multiplier, params.output_shift, vl);
+    sum = __riscv_vadd_vx_i32m4(sum, params.output_offset, vl);
+    sum = __riscv_vmin_vx_i32m4(sum, params.quantized_activation_max, vl);
+    sum = __riscv_vmax_vx_i32m4(sum, params.quantized_activation_min, vl);
+    vint16m2_t narrowed = __riscv_vnclip_wx_i16m2(sum, 0, __RISCV_VXRM_RDN, vl);
+    vint8m1_t result_s8 = __riscv_vnclip_wx_i8m1(narrowed, 0, __RISCV_VXRM_RDN, vl);
+    vuint8m1_t result = __riscv_vreinterpret_v_i8m1_u8m1(result_s8);
+    __riscv_vse8_v_u8m1(output_data + i, result, vl);
+    i += vl;
   }
 #endif  // NEON
 
@@ -1941,6 +1984,17 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
 
     vst1q_f32(output_data + i, x);
   }
+#elif defined(USE_RVV)
+  for (; i < size;) {
+    size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t a1 = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t a2 = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t x = __riscv_vfmul_vv_f32m4(a1, a2, vl);
+    x = __riscv_vfmax_vf_f32m4(x, output_activation_min, vl);
+    x = __riscv_vfmin_vf_f32m4(x, output_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, x, vl);
+    i += vl;
+  }
 #endif  // NEON
 
   for (; i < size; i++) {
@@ -1997,6 +2051,17 @@ inline void MulElementwise(int32_t n, const ArithmeticParams& params,
     vst1q_s32(out + i + 4, min_reg2);
     vst1q_s32(out + i + 8, min_reg3);
     vst1q_s32(out + i + 12, min_reg4);
+  }
+#elif defined(USE_RVV)
+  for (; i < n;) {
+    size_t vl = __riscv_vsetvl_e32m4(n - i);
+    vint32m4_t l = __riscv_vle32_v_i32m4(lhs + i, vl);
+    vint32m4_t r = __riscv_vle32_v_i32m4(rhs + i, vl);
+    vint32m4_t p = __riscv_vmul_vv_i32m4(l, r, vl);
+    p = __riscv_vmin_vx_i32m4(p, activation_max_val, vl);
+    p = __riscv_vmax_vx_i32m4(p, activation_min_val, vl);
+    __riscv_vse32_v_i32m4(out + i, p, vl);
+    i += vl;
   }
 #endif
 
@@ -3123,6 +3188,22 @@ inline bool AveragePool(const PoolParams& params,
                       vaddw_u16(vld1q_u32(acc + channel + 4 * i), acc_reg[i]));
                 }
               }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+                vuint8m1_t input_reg =
+                    __riscv_vle8_v_u8m1(input_channel_ptr, vl);
+                input_channel_ptr += vl;
+                vuint16m2_t input_u16 =
+                    __riscv_vzext_vf2_u16m2(input_reg, vl);
+                vuint32m4_t input_u32 =
+                    __riscv_vzext_vf2_u32m4(input_u16, vl);
+                vuint32m4_t acc_reg =
+                    __riscv_vle32_v_u32m4(acc + channel, vl);
+                acc_reg = __riscv_vadd_vv_u32m4(acc_reg, input_u32, vl);
+                __riscv_vse32_v_u32m4(acc + channel, acc_reg, vl);
+                channel += vl;
+              }
 #endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] += *input_channel_ptr++;
@@ -3301,6 +3382,17 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                 acc_reg = vmax_u8(acc_reg, input_reg);
                 vst1_u8(acc + channel, acc_reg);
               }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                size_t vl = __riscv_vsetvl_e8m4(tranche_depth - channel);
+                vuint8m4_t acc_reg = __riscv_vle8_v_u8m4(acc + channel, vl);
+                vuint8m4_t input_reg =
+                    __riscv_vle8_v_u8m4(input_channel_ptr, vl);
+                input_channel_ptr += vl;
+                acc_reg = __riscv_vmaxu_vv_u8m4(acc_reg, input_reg, vl);
+                __riscv_vse8_v_u8m4(acc + channel, acc_reg, vl);
+                channel += vl;
+              }
 #endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] = std::max(acc[channel], *input_channel_ptr++);
@@ -3323,6 +3415,17 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             a = vmin_u8(a, vdup_n_u8(params.quantized_activation_max));
             a = vmax_u8(a, vdup_n_u8(params.quantized_activation_min));
             vst1_u8(output_ptr + channel, a);
+          }
+#elif defined(USE_RVV)
+          for (; channel < tranche_depth;) {
+            size_t vl = __riscv_vsetvl_e8m4(tranche_depth - channel);
+            vuint8m4_t a = __riscv_vle8_v_u8m4(acc + channel, vl);
+            a = __riscv_vminu_vx_u8m4(
+                a, params.quantized_activation_max, vl);
+            a = __riscv_vmaxu_vx_u8m4(
+                a, params.quantized_activation_min, vl);
+            __riscv_vse8_v_u8m4(output_ptr + channel, a, vl);
+            channel += vl;
           }
 #endif
           for (; channel < tranche_depth; ++channel) {
@@ -5264,6 +5367,39 @@ inline void Quantize(const int32_t* multiplier, const int32_t* shift,
     }
   }
 
+#elif defined(USE_RVV)
+  for (; c < channel_size;) {
+    size_t vl = __riscv_vsetvl_e32m2(channel_size - c);
+    vint32m2_t out_shift_v = __riscv_vle32_v_i32m2(shift + c, vl);
+    vint32m2_t out_mul_v = __riscv_vle32_v_i32m2(multiplier + c, vl);
+    for (int n = 0; n < rows; ++n) {
+      int loc = n * channel_size + c;
+      vint32m2_t acc_v = __riscv_vle32_v_i32m2(scratch + loc, vl);
+      vint32m2_t left_shift_v =
+          __riscv_vmax_vx_i32m2(out_shift_v, 0, vl);
+      vint32m2_t right_shift_v = __riscv_vmax_vx_i32m2(
+          __riscv_vneg_v_i32m2(out_shift_v, vl), 0, vl);
+      acc_v = __riscv_vsll_vv_i32m2(
+          acc_v, __riscv_vreinterpret_v_i32m2_u32m2(left_shift_v), vl);
+      vint64m4_t product = __riscv_vwmul_vv_i64m4(acc_v, out_mul_v, vl);
+      vint64m4_t nudge = __riscv_vmv_v_x_i64m4(1LL << 30, vl);
+      product = __riscv_vadd_vv_i64m4(product, nudge, vl);
+      product = __riscv_vsra_vx_i64m4(product, 31, vl);
+      acc_v = __riscv_vnclip_wx_i32m2(product, 0, __RISCV_VXRM_RDN, vl);
+      acc_v = __riscv_vsra_vv_i32m2(
+          acc_v, __riscv_vreinterpret_v_i32m2_u32m2(right_shift_v), vl);
+      acc_v = __riscv_vadd_vx_i32m2(acc_v, output_zp, vl);
+      acc_v = __riscv_vmax_vx_i32m2(acc_v, output_min, vl);
+      acc_v = __riscv_vmin_vx_i32m2(acc_v, output_max, vl);
+      vint16m1_t narrowed16 =
+          __riscv_vnclip_wx_i16m1(acc_v, 0, __RISCV_VXRM_RDN, vl);
+      vint8mf2_t narrowed8 =
+          __riscv_vnclip_wx_i8mf2(narrowed16, 0, __RISCV_VXRM_RDN, vl);
+      __riscv_vse8_v_i8mf2(output + loc, narrowed8, vl);
+    }
+    c += vl;
+  }
+
 #endif  // USE_NEON
   // Handle leftover values, one by one. This is very slow.
   for (; c < channel_size; c++) {
@@ -6105,6 +6241,18 @@ inline void HardSwish(const RuntimeShape& input_shape, const float* input_data,
         vminq_f32(six, vmaxq_f32(zero, vaddq_f32(in, three)));
     const float32x4_t product = vmulq_f32(in_scaled, in_reluish);
     vst1q_f32(output_data + i, product);
+  }
+#elif defined(USE_RVV)
+  for (; i < size;) {
+    size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t in = __riscv_vle32_v_f32m4(input_data + i, vl);
+    vfloat32m4_t in_scaled = __riscv_vfmul_vf_f32m4(in, 1.0f / 6.0f, vl);
+    vfloat32m4_t shifted = __riscv_vfadd_vf_f32m4(in, 3.0f, vl);
+    shifted = __riscv_vfmax_vf_f32m4(shifted, 0.0f, vl);
+    shifted = __riscv_vfmin_vf_f32m4(shifted, 6.0f, vl);
+    vfloat32m4_t result = __riscv_vfmul_vv_f32m4(in_scaled, shifted, vl);
+    __riscv_vse32_v_f32m4(output_data + i, result, vl);
+    i += vl;
   }
 #endif
   for (; i < size; i++) {

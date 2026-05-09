@@ -108,6 +108,19 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                 acc_reg = vmax_s8(acc_reg, input_reg);
                 vst1_s8(acc + channel, acc_reg);
               }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                size_t vl =
+                    __riscv_vsetvl_e8m4(tranche_depth - channel);
+                vint8m4_t acc_reg =
+                    __riscv_vle8_v_i8m4(acc + channel, vl);
+                vint8m4_t input_reg =
+                    __riscv_vle8_v_i8m4(input_channel_ptr, vl);
+                input_channel_ptr += vl;
+                acc_reg = __riscv_vmax_vv_i8m4(acc_reg, input_reg, vl);
+                __riscv_vse8_v_i8m4(acc + channel, acc_reg, vl);
+                channel += vl;
+              }
 #endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] = std::max(acc[channel], *input_channel_ptr++);
@@ -130,6 +143,18 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             a = vmin_s8(a, vdup_n_s8(params.quantized_activation_max));
             a = vmax_s8(a, vdup_n_s8(params.quantized_activation_min));
             vst1_s8(output_ptr + channel, a);
+          }
+#elif defined(USE_RVV)
+          for (; channel < tranche_depth;) {
+            size_t vl =
+                __riscv_vsetvl_e8m4(tranche_depth - channel);
+            vint8m4_t a = __riscv_vle8_v_i8m4(acc + channel, vl);
+            a = __riscv_vmin_vx_i8m4(
+                a, params.quantized_activation_max, vl);
+            a = __riscv_vmax_vx_i8m4(
+                a, params.quantized_activation_min, vl);
+            __riscv_vse8_v_i8m4(output_ptr + channel, a, vl);
+            channel += vl;
           }
 #endif
           for (; channel < tranche_depth; ++channel) {
@@ -231,6 +256,24 @@ inline bool AveragePool(const PoolParams& params,
                       acc + channel + 4 * i,
                       vaddw_s16(vld1q_s32(acc + channel + 4 * i), acc_reg[i]));
                 }
+              }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                size_t vl =
+                    __riscv_vsetvl_e8m1(tranche_depth - channel);
+                vint8m1_t input_reg =
+                    __riscv_vle8_v_i8m1(input_channel_ptr, vl);
+                input_channel_ptr += vl;
+                vint16m2_t input_i16 =
+                    __riscv_vsext_vf2_i16m2(input_reg, vl);
+                vint32m4_t input_i32 =
+                    __riscv_vsext_vf2_i32m4(input_i16, vl);
+                vint32m4_t acc_reg =
+                    __riscv_vle32_v_i32m4(acc + channel, vl);
+                acc_reg =
+                    __riscv_vadd_vv_i32m4(acc_reg, input_i32, vl);
+                __riscv_vse32_v_i32m4(acc + channel, acc_reg, vl);
+                channel += vl;
               }
 #endif
               for (; channel < tranche_depth; ++channel) {

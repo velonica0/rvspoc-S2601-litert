@@ -319,6 +319,7 @@ set(TEST_WITH_GTEST_MAIN_LIST
   eigen_support_test.cc
   kernel_util_test.cc
   optional_tensor_test.cc
+  rvv_accuracy_test.cc
   subgraph_test_util_test.cc
   test_util_test.cc
 )
@@ -330,6 +331,15 @@ endforeach()
 foreach(test_src IN LISTS TEST_WITH_GTEST_MAIN_LIST)
   add_kernel_test(${test_src} tensorflow-lite-test-gtest-main)
 endforeach()
+
+# RVV benchmark (requires google benchmark, only built with TFLITE_KERNEL_TEST)
+if(TARGET benchmark::benchmark)
+  add_executable(rvv_benchmark rvv_benchmark.cc)
+  target_link_libraries(rvv_benchmark
+    tensorflow-lite
+    benchmark::benchmark
+  )
+endif()
 
 # Copy the test utility that facilitates cross-compiled kernel tests run with launch arguments
 if(${CMAKE_CROSSCOMPILING})

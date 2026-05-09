@@ -485,7 +485,7 @@ TfLiteRegistration* Register_ADD_NEON_OPT() {
 }
 
 TfLiteRegistration* Register_ADD() {
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   return Register_ADD_NEON_OPT();
 #else
   return Register_ADD_GENERIC_OPT();

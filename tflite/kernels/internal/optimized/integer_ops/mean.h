@@ -21,6 +21,7 @@ limitations under the License.
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_quantization_utils.h"
 
 namespace tflite {
 namespace optimized_integer_ops {
@@ -122,6 +123,34 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
       int8_t* output_data_ptr =
           output_data + Offset(output_shape, out_b, 0, 0, out_d);
       vst1q_s8(output_data_ptr, combined_output);
+    }
+#elif defined(USE_RVV)
+    for (; out_d < end_depth;) {
+      size_t vl = __riscv_vsetvl_e8m1(end_depth - out_d);
+      vint32m4_t temp_sum = __riscv_vmv_v_x_i32m4(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const int8_t* input_data_ptr =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          vint8m1_t input_val = __riscv_vle8_v_i8m1(input_data_ptr, vl);
+          vint16m2_t input_16 = __riscv_vsext_vf2_i16m2(input_val, vl);
+          vint32m4_t input_32 = __riscv_vsext_vf2_i32m4(input_16, vl);
+          temp_sum = __riscv_vadd_vv_i32m4(temp_sum, input_32, vl);
+        }
+      }
+      temp_sum = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+          temp_sum, multiplier, shift, vl);
+      temp_sum = __riscv_vadd_vx_i32m4(temp_sum, bias, vl);
+      temp_sum = __riscv_vmax_vx_i32m4(temp_sum, kMinValue, vl);
+      temp_sum = __riscv_vmin_vx_i32m4(temp_sum, kMaxValue, vl);
+      vint16m2_t narrowed16 =
+          __riscv_vnclip_wx_i16m2(temp_sum, 0, __RISCV_VXRM_RDN, vl);
+      vint8m1_t result =
+          __riscv_vnclip_wx_i8m1(narrowed16, 0, __RISCV_VXRM_RDN, vl);
+      int8_t* output_data_ptr =
+          output_data + Offset(output_shape, out_b, 0, 0, out_d);
+      __riscv_vse8_v_i8m1(output_data_ptr, result, vl);
+      out_d += vl;
     }
 #endif  // USE_NEON
 

@@ -845,7 +845,7 @@ inline void FloatDepthwiseConvAccumRowGeneric(
     const float* input_data, int pad_width, int depth_multiplier,
     int filter_width, const float* filter_data, int out_x_buffer_start,
     int out_x_buffer_end, int output_depth, float* acc_buffer) {
-  ruy::profiler::ScopeLabel label("DepthwiseConvAccumRowGeneric (slow)");
+  ruy::profiler::ScopeLabel label("DepthwiseConvAccumRowGeneric");
   const float* filter_base_ptr = filter_data;
   for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
     const int out_x_loop_start = std::max(
@@ -864,11 +864,31 @@ inline void FloatDepthwiseConvAccumRowGeneric(
     const int input_ptr_increment = (stride - 1) * input_depth;
     for (int out_x = out_x_loop_start; out_x < out_x_loop_end; out_x++) {
       const float* filter_ptr = filter_base_ptr;
-      for (int ic = 0; ic < input_depth; ++ic) {
-        const float input_val = *input_ptr++;
-        for (int m = 0; m < depth_multiplier; m++) {
-          const float filter_val = *filter_ptr++;
-          *acc_buffer_ptr++ += filter_val * input_val;
+#ifdef USE_RVV
+      if (depth_multiplier == 1) {
+        int ic = 0;
+        for (; ic < input_depth;) {
+          size_t vl = __riscv_vsetvl_e32m4(input_depth - ic);
+          vfloat32m4_t acc_v =
+              __riscv_vle32_v_f32m4(acc_buffer_ptr + ic, vl);
+          vfloat32m4_t filt_v =
+              __riscv_vle32_v_f32m4(filter_ptr + ic, vl);
+          acc_v = __riscv_vfmacc_vf_f32m4(acc_v, input_ptr[ic], filt_v, vl);
+          __riscv_vse32_v_f32m4(acc_buffer_ptr + ic, acc_v, vl);
+          ic += vl;
+        }
+        input_ptr += input_depth;
+        filter_ptr += input_depth;
+        acc_buffer_ptr += output_depth;
+      } else
+#endif  // USE_RVV
+      {
+        for (int ic = 0; ic < input_depth; ++ic) {
+          const float input_val = *input_ptr++;
+          for (int m = 0; m < depth_multiplier; m++) {
+            const float filter_val = *filter_ptr++;
+            *acc_buffer_ptr++ += filter_val * input_val;
+          }
         }
       }
       input_ptr += input_ptr_increment;
@@ -1094,6 +1114,17 @@ inline void DepthwiseConvImpl(
 
           vst1q_f32(output_ptr, acc);
           output_ptr += 4;
+        }
+#elif defined(USE_RVV)
+        for (; i < num_output_values;) {
+          size_t vl = __riscv_vsetvl_e32m4(num_output_values - i);
+          vfloat32m4_t acc_v =
+              __riscv_vle32_v_f32m4(acc_buffer + i, vl);
+          acc_v = __riscv_vfmax_vf_f32m4(acc_v, output_activation_min, vl);
+          acc_v = __riscv_vfmin_vf_f32m4(acc_v, output_activation_max, vl);
+          __riscv_vse32_v_f32m4(output_ptr, acc_v, vl);
+          output_ptr += vl;
+          i += vl;
         }
 #endif
         // Handle leftover values, one by one. This is very slow.

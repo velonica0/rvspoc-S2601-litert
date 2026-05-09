@@ -345,7 +345,7 @@ TfLiteRegistration* Register_DIV_NEON_OPT() {
 }
 
 TfLiteRegistration* Register_DIV() {
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   return Register_DIV_NEON_OPT();
 #else
   return Register_DIV_GENERIC_OPT();

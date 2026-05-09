@@ -189,6 +189,14 @@ if (NOT CMAKE_SYSTEM_PROCESSOR OR CMAKE_SYSTEM_PROCESSOR MATCHES "x86")
   find_package(NEON_2_SSE REQUIRED)
   list(APPEND TFLITE_TARGET_DEPENDENCIES NEON_2_SSE::NEON_2_SSE)
 endif()
+# RISC-V Vector extension support
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv" OR CMAKE_SYSTEM_PROCESSOR MATCHES "rv64")
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=rv64gcv" COMPILER_SUPPORTS_RVV)
+  if(COMPILER_SUPPORTS_RVV)
+    message(STATUS "RISC-V Vector extension (RVV) support enabled")
+  endif()
+endif()
 find_package(cpuinfo REQUIRED)  #CPUINFO is used by XNNPACK and RUY library
 find_package(ml_dtypes REQUIRED)
 find_package(ruy REQUIRED)
@@ -625,7 +633,7 @@ if(_TFLITE_ENABLE_RUY)
 endif()
 populate_tflite_source_vars("kernels"
   TFLITE_KERNEL_SRCS
-  FILTER "([^/]*_test_util_internal|test_[^/]*|[^/]*_ops_wrapper)\\.(cc|h)$"
+  FILTER "([^/]*_test_util_internal|test_[^/]*|[^/]*_ops_wrapper|rvv_.*_test|rvv_benchmark)\\.(cc|h)$"
 )
 populate_tflite_source_vars("kernels/internal" TFLITE_KERNEL_INTERNAL_SRCS)
 populate_tflite_source_vars("kernels/internal/optimized"
@@ -836,6 +844,12 @@ if(TFLITE_KERNEL_TEST)
   enable_testing()
   add_subdirectory(${TFLITE_SOURCE_DIR}/kernels)
 endif()
+
+# RVV standalone accuracy test + benchmark (no test framework dependency)
+add_executable(rvv_standalone_test
+  ${TFLITE_SOURCE_DIR}/kernels/rvv_standalone_test.cc
+)
+target_link_libraries(rvv_standalone_test tensorflow-lite)
 
 # Add the generated headers directory. Required for maintaining the
 # tensorflow/lite directory structure for generated headers.

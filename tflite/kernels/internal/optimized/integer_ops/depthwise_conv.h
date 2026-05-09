@@ -1501,7 +1501,7 @@ inline void QuantizedDepthwiseConvAccumRowGeneric(
     int depth_multiplier, int filter_width, const int8_t* filter_data,
     int out_x_buffer_start, int out_x_buffer_end, int output_depth,
     int32_t* acc_buffer) {
-  ruy::profiler::ScopeLabel label("DepthwiseConvAccumRowGeneric (slow)");
+  ruy::profiler::ScopeLabel label("DepthwiseConvAccumRowGeneric");
   const int8_t* filter_base_ptr = filter_data;
   for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
     const int out_x_loop_start = std::max(
@@ -1520,11 +1520,34 @@ inline void QuantizedDepthwiseConvAccumRowGeneric(
     const int input_ptr_increment = (stride - 1) * input_depth;
     for (int out_x = out_x_loop_start; out_x < out_x_loop_end; out_x++) {
       const int8_t* filter_ptr = filter_base_ptr;
-      for (int ic = 0; ic < input_depth; ++ic) {
-        const int16_t input_val = *input_ptr++ + input_offset;
-        for (int m = 0; m < depth_multiplier; m++) {
-          const int16_t filter_val = *filter_ptr++;
-          *acc_buffer_ptr++ += static_cast<int32_t>(filter_val) * input_val;
+#ifdef USE_RVV
+      if (depth_multiplier == 1) {
+        int ic = 0;
+        for (; ic < input_depth;) {
+          size_t vl = __riscv_vsetvl_e8m1(input_depth - ic);
+          vint8m1_t in_v = __riscv_vle8_v_i8m1(input_ptr + ic, vl);
+          vint8m1_t filt_v = __riscv_vle8_v_i8m1(filter_ptr + ic, vl);
+          vint16m2_t in_16 = __riscv_vsext_vf2_i16m2(in_v, vl);
+          in_16 = __riscv_vadd_vx_i16m2(in_16, input_offset, vl);
+          vint16m2_t filt_16 = __riscv_vsext_vf2_i16m2(filt_v, vl);
+          vint32m4_t acc_v =
+              __riscv_vle32_v_i32m4(acc_buffer_ptr + ic, vl);
+          acc_v = __riscv_vwmacc_vv_i32m4(acc_v, in_16, filt_16, vl);
+          __riscv_vse32_v_i32m4(acc_buffer_ptr + ic, acc_v, vl);
+          ic += vl;
+        }
+        input_ptr += input_depth;
+        filter_ptr += input_depth;
+        acc_buffer_ptr += output_depth;
+      } else
+#endif  // USE_RVV
+      {
+        for (int ic = 0; ic < input_depth; ++ic) {
+          const int16_t input_val = *input_ptr++ + input_offset;
+          for (int m = 0; m < depth_multiplier; m++) {
+            const int16_t filter_val = *filter_ptr++;
+            *acc_buffer_ptr++ += static_cast<int32_t>(filter_val) * input_val;
+          }
         }
       }
       input_ptr += input_ptr_increment;
@@ -1597,6 +1620,16 @@ inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
       vst1q_s32(acc_buffer + 16 * i + 4, b1);
       vst1q_s32(acc_buffer + 16 * i + 8, b2);
       vst1q_s32(acc_buffer + 16 * i + 12, b3);
+    }
+  }
+#elif defined(USE_RVV)
+  for (; i < num_output_pixels; i++) {
+    int j = 0;
+    for (; j < output_depth;) {
+      size_t vl = __riscv_vsetvl_e32m4(output_depth - j);
+      vint32m4_t b = __riscv_vle32_v_i32m4(bias_data + j, vl);
+      __riscv_vse32_v_i32m4(acc_buffer + i * output_depth + j, b, vl);
+      j += vl;
     }
   }
 #endif

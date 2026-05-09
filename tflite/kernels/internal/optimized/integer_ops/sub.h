@@ -21,6 +21,8 @@ limitations under the License.
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/compatibility.h"
 #include "tflite/kernels/internal/optimized/avx2_quantization_utils.h"
+#include "tflite/kernels/internal/optimized/neon_check.h"
+#include "tflite/kernels/internal/optimized/rvv_quantization_utils.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -95,6 +97,32 @@ inline void SubElementwiseInt16(int size, const ArithmeticParams& params,
 
     avx2_utils::CastInt32ToInt16AndStore(output_data + i, s1);
     avx2_utils::CastInt32ToInt16AndStore(output_data + i + 8, s2);
+  }
+#elif defined(USE_RVV)
+  const int input1_left_shift = params.left_shift + params.input1_shift;
+  const int input2_left_shift = params.left_shift + params.input2_shift;
+  for (; i < size;) {
+    size_t vl = __riscv_vsetvl_e16m1(size - i);
+    vint16m1_t v1 = __riscv_vle16_v_i16m1(input1_data + i, vl);
+    vint16m1_t v2 = __riscv_vle16_v_i16m1(input2_data + i, vl);
+    vint32m2_t x1 = __riscv_vsext_vf2_i32m2(v1, vl);
+    vint32m2_t x2 = __riscv_vsext_vf2_i32m2(v2, vl);
+    x1 = __riscv_vadd_vx_i32m2(x1, params.input1_offset, vl);
+    x2 = __riscv_vadd_vx_i32m2(x2, params.input2_offset, vl);
+    x1 = rvv_utils::MultiplyByQuantizedMultiplier_m2(
+        x1, params.input1_multiplier, input1_left_shift, vl);
+    x2 = rvv_utils::MultiplyByQuantizedMultiplier_m2(
+        x2, params.input2_multiplier, input2_left_shift, vl);
+    vint32m2_t diff = __riscv_vsub_vv_i32m2(x1, x2, vl);
+    diff = rvv_utils::MultiplyByQuantizedMultiplier_m2(
+        diff, params.output_multiplier, params.output_shift, vl);
+    diff = __riscv_vadd_vx_i32m2(diff, params.output_offset, vl);
+    diff = __riscv_vmin_vx_i32m2(diff, params.quantized_activation_max, vl);
+    diff = __riscv_vmax_vx_i32m2(diff, params.quantized_activation_min, vl);
+    vint16m1_t result =
+        __riscv_vnclip_wx_i16m1(diff, 0, __RISCV_VXRM_RDN, vl);
+    __riscv_vse16_v_i16m1(output_data + i, result, vl);
+    i += vl;
   }
 #endif  // __AVX2__
 

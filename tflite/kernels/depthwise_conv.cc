@@ -679,7 +679,7 @@ TfLiteRegistration* Register_DEPTHWISE_CONVOLUTION_NEON_OPT_UINT8() {
 }
 
 TfLiteRegistration* Register_DEPTHWISE_CONV_2D() {
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   return Register_DEPTHWISE_CONVOLUTION_NEON_OPT();
 #else
   return Register_DEPTHWISE_CONVOLUTION_GENERIC_OPT();
@@ -690,7 +690,7 @@ TfLiteRegistration* Register_DEPTHWISE_CONV_2D() {
 // models only need the UINT8 type. TFLite's op registration mechanism doesn't
 // yet allow for more nuanced registration mechanisms.
 TfLiteRegistration* Register_DEPTHWISE_CONV_2D_UINT8() {
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   return Register_DEPTHWISE_CONVOLUTION_NEON_OPT_UINT8();
 #else
   return Register_DEPTHWISE_CONV_2D();

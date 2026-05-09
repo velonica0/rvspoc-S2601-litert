@@ -169,7 +169,7 @@ TfLiteRegistration* Register_RESIZE_NEAREST_NEIGHBOR_NEON_OPT() {
 }
 
 TfLiteRegistration* Register_RESIZE_NEAREST_NEIGHBOR() {
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   return Register_RESIZE_NEAREST_NEIGHBOR_NEON_OPT();
 #else
   return Register_RESIZE_NEAREST_NEIGHBOR_GENERIC_OPT();

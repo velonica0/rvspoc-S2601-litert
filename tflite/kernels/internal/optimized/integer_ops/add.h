@@ -24,6 +24,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/avx2_quantization_utils.h"
 #include "tflite/kernels/internal/optimized/cpu_check.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
+#include "tflite/kernels/internal/optimized/rvv_quantization_utils.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
 #include "tflite/kernels/internal/types.h"
@@ -138,6 +139,36 @@ inline void AddElementwiseInt8(int size, const ArithmeticParams& params,
         vmaxq_s8(output_activation_min_vector,
                  vminq_s8(output_activation_max_vector, s));
     vst1q_s8(output_data + i, clamped);
+  }
+#elif defined(USE_RVV)
+  const int input1_left_shift = params.left_shift + params.input1_shift;
+  const int input2_left_shift = params.left_shift + params.input2_shift;
+  for (; i < size;) {
+    size_t vl = __riscv_vsetvl_e8m1(size - i);
+    vint8m1_t v1 = __riscv_vle8_v_i8m1(input1_data + i, vl);
+    vint8m1_t v2 = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    vint16m2_t v1_16 = __riscv_vsext_vf2_i16m2(v1, vl);
+    vint16m2_t v2_16 = __riscv_vsext_vf2_i16m2(v2, vl);
+    v1_16 = __riscv_vadd_vx_i16m2(v1_16, params.input1_offset, vl);
+    v2_16 = __riscv_vadd_vx_i16m2(v2_16, params.input2_offset, vl);
+    vint32m4_t x1 = __riscv_vsext_vf2_i32m4(v1_16, vl);
+    vint32m4_t x2 = __riscv_vsext_vf2_i32m4(v2_16, vl);
+    x1 = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+        x1, params.input1_multiplier, input1_left_shift, vl);
+    x2 = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+        x2, params.input2_multiplier, input2_left_shift, vl);
+    vint32m4_t sum = __riscv_vadd_vv_i32m4(x1, x2, vl);
+    sum = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+        sum, params.output_multiplier, params.output_shift, vl);
+    sum = __riscv_vadd_vx_i32m4(sum, params.output_offset, vl);
+    sum = __riscv_vmin_vx_i32m4(sum, params.quantized_activation_max, vl);
+    sum = __riscv_vmax_vx_i32m4(sum, params.quantized_activation_min, vl);
+    vint16m2_t narrowed16 =
+        __riscv_vnclip_wx_i16m2(sum, 0, __RISCV_VXRM_RDN, vl);
+    vint8m1_t result =
+        __riscv_vnclip_wx_i8m1(narrowed16, 0, __RISCV_VXRM_RDN, vl);
+    __riscv_vse8_v_i8m1(output_data + i, result, vl);
+    i += vl;
   }
 #endif  // NEON
 
@@ -329,6 +360,32 @@ inline void AddElementwiseInt16(int size, const ArithmeticParams& params,
     vst1q_s16(output_data + i, s1);
     vst1q_s16(output_data + 8 + i, s2);
   }
+#elif defined(USE_RVV)
+  const int input1_left_shift = params.left_shift + params.input1_shift;
+  const int input2_left_shift = params.left_shift + params.input2_shift;
+  for (; i < size;) {
+    size_t vl = __riscv_vsetvl_e16m1(size - i);
+    vint16m1_t v1 = __riscv_vle16_v_i16m1(input1_data + i, vl);
+    vint16m1_t v2 = __riscv_vle16_v_i16m1(input2_data + i, vl);
+    vint32m2_t x1 = __riscv_vsext_vf2_i32m2(v1, vl);
+    vint32m2_t x2 = __riscv_vsext_vf2_i32m2(v2, vl);
+    x1 = __riscv_vadd_vx_i32m2(x1, params.input1_offset, vl);
+    x2 = __riscv_vadd_vx_i32m2(x2, params.input2_offset, vl);
+    x1 = rvv_utils::MultiplyByQuantizedMultiplier_m2(
+        x1, params.input1_multiplier, input1_left_shift, vl);
+    x2 = rvv_utils::MultiplyByQuantizedMultiplier_m2(
+        x2, params.input2_multiplier, input2_left_shift, vl);
+    vint32m2_t sum = __riscv_vadd_vv_i32m2(x1, x2, vl);
+    sum = rvv_utils::MultiplyByQuantizedMultiplier_m2(
+        sum, params.output_multiplier, params.output_shift, vl);
+    sum = __riscv_vadd_vx_i32m2(sum, params.output_offset, vl);
+    sum = __riscv_vmin_vx_i32m2(sum, params.quantized_activation_max, vl);
+    sum = __riscv_vmax_vx_i32m2(sum, params.quantized_activation_min, vl);
+    vint16m1_t result =
+        __riscv_vnclip_wx_i16m1(sum, 0, __RISCV_VXRM_RDN, vl);
+    __riscv_vse16_v_i16m1(output_data + i, result, vl);
+    i += vl;
+  }
 #endif  // NEON
 
   for (; i < size; ++i) {
@@ -424,6 +481,36 @@ inline void AddScalarBroadcast(int size, const ArithmeticParams& params,
         vmax_s8(output_activation_min_vector,
                 vmin_s8(output_activation_max_vector, vqmovn_s16(s)));
     vst1_s8(output_data + i, clamped);
+  }
+#elif defined(USE_RVV)
+  {
+    const int32 input1_val = params.input1_offset + input1_data;
+    const int32 shifted_input1_val = input1_val * (1 << params.left_shift);
+    const int32 scaled_input1_val =
+        MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input1_val, params.input1_multiplier, params.input1_shift);
+    const int input2_left_shift = params.left_shift + params.input2_shift;
+    for (; i < size;) {
+      size_t vl = __riscv_vsetvl_e8m1(size - i);
+      vint8m1_t v2 = __riscv_vle8_v_i8m1(input2_data + i, vl);
+      vint16m2_t v2_16 = __riscv_vsext_vf2_i16m2(v2, vl);
+      v2_16 = __riscv_vadd_vx_i16m2(v2_16, params.input2_offset, vl);
+      vint32m4_t x2 = __riscv_vsext_vf2_i32m4(v2_16, vl);
+      x2 = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+          x2, params.input2_multiplier, input2_left_shift, vl);
+      vint32m4_t sum = __riscv_vadd_vx_i32m4(x2, scaled_input1_val, vl);
+      sum = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+          sum, params.output_multiplier, params.output_shift, vl);
+      sum = __riscv_vadd_vx_i32m4(sum, params.output_offset, vl);
+      sum = __riscv_vmin_vx_i32m4(sum, params.quantized_activation_max, vl);
+      sum = __riscv_vmax_vx_i32m4(sum, params.quantized_activation_min, vl);
+      vint16m2_t narrowed16 =
+          __riscv_vnclip_wx_i16m2(sum, 0, __RISCV_VXRM_RDN, vl);
+      vint8m1_t result =
+          __riscv_vnclip_wx_i8m1(narrowed16, 0, __RISCV_VXRM_RDN, vl);
+      __riscv_vse8_v_i8m1(output_data + i, result, vl);
+      i += vl;
+    }
   }
 #endif  // NEON
 

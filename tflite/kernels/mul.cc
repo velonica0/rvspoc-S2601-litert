@@ -427,7 +427,7 @@ TfLiteRegistration* Register_MUL_NEON_OPT() {
 }
 
 TfLiteRegistration* Register_MUL() {
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   return Register_MUL_NEON_OPT();
 #else
   return Register_MUL_GENERIC_OPT();

@@ -1312,6 +1312,19 @@ inline void ResizeBilinearKernel(const float* input_ptr, int32_t depth,
     input_ptr++;
   }
 }
+#elif defined(USE_RVV)
+inline void ResizeBilinearKernel(const float* input_ptr, int32_t depth,
+                                 float scale, float* output_ptr) {
+  int ic = 0;
+  for (; ic < depth;) {
+    size_t vl = __riscv_vsetvl_e32m4(depth - ic);
+    vfloat32m4_t in = __riscv_vle32_v_f32m4(input_ptr + ic, vl);
+    vfloat32m4_t acc = __riscv_vle32_v_f32m4(output_ptr + ic, vl);
+    acc = __riscv_vfmacc_vf_f32m4(acc, scale, in, vl);
+    __riscv_vse32_v_f32m4(output_ptr + ic, acc, vl);
+    ic += vl;
+  }
+}
 #else
 inline void ResizeBilinearKernel(const float* input_ptr, int32 depth,
                                  float scale, float* output_ptr) {

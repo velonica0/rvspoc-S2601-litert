@@ -532,7 +532,7 @@ TfLiteRegistration* Register_SUB_NEON_OPT() {
 }
 
 TfLiteRegistration* Register_SUB() {
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   return Register_SUB_NEON_OPT();
 #else
   return Register_SUB_GENERIC_OPT();
