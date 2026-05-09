@@ -801,6 +801,14 @@ inline void ShuffledFullyConnected(
       val = veorq_u8(val, signbit);
       vst1q_u8(shuffled_input_workspace_data + i, val);
     }
+#elif defined(USE_RVV)
+    for (int i = 0; i < accum_depth;) {
+      size_t vl = __riscv_vsetvl_e8m4(accum_depth - i);
+      vuint8m4_t val = __riscv_vle8_v_u8m4(input_data + i, vl);
+      val = __riscv_vxor_vx_u8m4(val, 0x80, vl);
+      __riscv_vse8_v_u8m4(shuffled_input_workspace_data + i, val, vl);
+      i += vl;
+    }
 #else
     for (int i = 0; i < accum_depth; i++) {
       shuffled_input_workspace_data[i] = input_data[i] ^ 0x80;

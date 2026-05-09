@@ -23,6 +23,7 @@ limitations under the License.
 #include "public/gemmlowp.h"
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/internal/optimized/cpu_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/optimized/depthwiseconv_multithread.h"
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv.h"
 #include "tflite/kernels/internal/optimized/integer_ops/fully_connected.h"
@@ -1114,7 +1115,7 @@ inline void FullyConnected(
   const int output_dim_count = output_shape.DimensionsCount();
   const int filter_dim_count = filter_shape.DimensionsCount();
   const int batches = FlatSizeSkipDim(output_shape, output_dim_count - 1);
-#ifdef USE_NEON
+#if defined(USE_NEON) || defined(USE_RVV)
   if (batches == 1) {
     const int output_size = MatchingDim(filter_shape, filter_dim_count - 2,
                                         output_shape, output_dim_count - 1);
@@ -1126,7 +1127,7 @@ inline void FullyConnected(
           output_activation_max, output_shape, output_data, gemmlowp_context);
     }
   }
-#endif  // USE_NEON
+#endif  // USE_NEON || USE_RVV
   const int filter_rows = filter_shape.Dims(filter_dim_count - 2);
   const int filter_cols = filter_shape.Dims(filter_dim_count - 1);
   TFLITE_DCHECK_EQ(filter_shape.FlatSize(), filter_rows * filter_cols);
@@ -4064,6 +4065,18 @@ inline void Softmax(const SoftmaxParams& params,
       uint8x8_t max2 = vmax_u8(max4, vext_u8(max4, max4, 2));
       uint8x8_t max1 = vpmax_u8(max2, max2);
       max_in_row = vget_lane_u8(max1, 0);
+#elif defined(USE_RVV)
+      vuint8m4_t vmax_v = __riscv_vmv_v_x_u8m4(0, __riscv_vsetvl_e8m4(depth));
+      for (; c < depth;) {
+        size_t vl = __riscv_vsetvl_e8m4(depth - c);
+        vuint8m4_t v = __riscv_vle8_v_u8m4(input_data_ptr + c, vl);
+        vmax_v = __riscv_vmaxu_vv_u8m4(vmax_v, v, vl);
+        c += vl;
+      }
+      vuint8m1_t id = __riscv_vmv_v_x_u8m1(0, 1);
+      vuint8m1_t rmax = __riscv_vredmaxu_vs_u8m4_u8m1(
+          vmax_v, id, __riscv_vsetvl_e8m4(depth));
+      max_in_row = __riscv_vmv_x_s_u8m1_u8(rmax);
 #endif
       for (; c < depth; ++c) {
         max_in_row = std::max(max_in_row, input_data_ptr[c]);

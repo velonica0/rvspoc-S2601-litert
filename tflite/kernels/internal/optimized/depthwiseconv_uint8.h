@@ -21,6 +21,8 @@ limitations under the License.
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/internal/optimized/cpu_check.h"
 #include "tflite/kernels/internal/optimized/depthwiseconv_uint8_3x3_filter.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
+#include "tflite/kernels/internal/optimized/rvv_quantization_utils.h"
 #include "tflite/kernels/internal/reference/depthwiseconv_uint8.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -1690,6 +1692,16 @@ inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
       vst1q_s32(acc_buffer + 16 * i + 12, b3);
     }
   }
+#elif defined(USE_RVV)
+  for (; i < num_output_pixels; i++) {
+    int j = 0;
+    for (; j < output_depth;) {
+      size_t vl = __riscv_vsetvl_e32m4(output_depth - j);
+      vint32m4_t b = __riscv_vle32_v_i32m4(bias_data + j, vl);
+      __riscv_vse32_v_i32m4(acc_buffer + i * output_depth + j, b, vl);
+      j += vl;
+    }
+  }
 #endif
   for (; i < num_output_pixels; i++) {
     memcpy(acc_buffer + i * output_depth, bias_data,
@@ -2009,6 +2021,25 @@ inline void DepthwiseConvGeneral(
           vst1_lane_u8(output_ptr + 2, res_u8, 2);
           vst1_lane_u8(output_ptr + 3, res_u8, 3);
           output_ptr += 4;
+        }
+#elif defined(USE_RVV)
+        for (; i < num_output_values;) {
+          size_t vl = __riscv_vsetvl_e32m4(num_output_values - i);
+          vint32m4_t acc_v = __riscv_vle32_v_i32m4(acc_buffer + i, vl);
+          acc_v = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+              acc_v, output_multiplier, output_shift, vl);
+          acc_v = __riscv_vadd_vx_i32m4(acc_v, output_offset, vl);
+          acc_v = __riscv_vmax_vx_i32m4(acc_v, output_activation_min, vl);
+          acc_v = __riscv_vmin_vx_i32m4(acc_v, output_activation_max, vl);
+          vint16m2_t n16 =
+              __riscv_vnclip_wx_i16m2(acc_v, 0, __RISCV_VXRM_RDN, vl);
+          vint8m1_t n8 =
+              __riscv_vnclip_wx_i8m1(n16, 0, __RISCV_VXRM_RDN, vl);
+          vuint8m1_t out =
+              __riscv_vreinterpret_v_i8m1_u8m1(n8);
+          __riscv_vse8_v_u8m1(output_ptr, out, vl);
+          output_ptr += vl;
+          i += vl;
         }
 #endif  // USE_NEON
 
