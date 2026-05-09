@@ -27,6 +27,8 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/reduce_utils.h"
 #include "tflite/kernels/internal/reduce_common.h"
 #include "tflite/kernels/internal/reference/reduce.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
+#include "tflite/kernels/internal/optimized/rvv_quantization_utils.h"
 #include "tflite/kernels/internal/runtime_shape.h"
 #include "tflite/kernels/internal/types.h"
 #include "tflite/kernels/kernel_util.h"
@@ -136,6 +138,35 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
       uint8_t* output_data_ptr =
           output_data + Offset(output_shape, out_b, 0, 0, out_d);
       vst1q_u8(output_data_ptr, combined_output);
+    }
+#elif defined(USE_RVV)
+    for (; out_d < end_depth;) {
+      size_t vl = __riscv_vsetvl_e8m1(end_depth - out_d);
+      vint32m4_t temp_sum = __riscv_vmv_v_x_i32m4(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const uint8_t* input_data_ptr =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          vuint8m1_t in_u8 = __riscv_vle8_v_u8m1(input_data_ptr, vl);
+          vuint16m2_t in_u16 = __riscv_vzext_vf2_u16m2(in_u8, vl);
+          vint16m2_t in_s16 = __riscv_vreinterpret_v_u16m2_i16m2(in_u16);
+          vint32m4_t in_s32 = __riscv_vsext_vf2_i32m4(in_s16, vl);
+          temp_sum = __riscv_vadd_vv_i32m4(temp_sum, in_s32, vl);
+        }
+      }
+      temp_sum = rvv_utils::MultiplyByQuantizedMultiplier_m4(
+          temp_sum, multiplier, shift, vl);
+      temp_sum = __riscv_vadd_vx_i32m4(temp_sum, bias, vl);
+      temp_sum = __riscv_vmax_vx_i32m4(temp_sum, kMinValue, vl);
+      temp_sum = __riscv_vmin_vx_i32m4(temp_sum, kMaxValue, vl);
+      vint16m2_t n16 =
+          __riscv_vnclip_wx_i16m2(temp_sum, 0, __RISCV_VXRM_RDN, vl);
+      vint8m1_t n8 = __riscv_vnclip_wx_i8m1(n16, 0, __RISCV_VXRM_RDN, vl);
+      vuint8m1_t result = __riscv_vreinterpret_v_i8m1_u8m1(n8);
+      uint8_t* output_data_ptr =
+          output_data + Offset(output_shape, out_b, 0, 0, out_d);
+      __riscv_vse8_v_u8m1(output_data_ptr, result, vl);
+      out_d += vl;
     }
 #endif  // USE_NEON
 

@@ -1477,6 +1477,35 @@ inline void ResizeBilinearKernel2x2(int32_t x0, int32_t x1, int32_t y0,
     output_data[output_offset + output_x_offset + output_y_offset] =
         (output + ((x1y0 + x1y1) / 2)) / 2;
   }
+#elif defined(USE_RVV)
+  int ic = 0;
+  for (; ic < depth;) {
+    size_t vl = __riscv_vsetvl_e32m4(depth - ic);
+    const float* ip = &input_data[Offset(input_shape, batch, y0, x0, ic)];
+    vfloat32m4_t v_x0y0 = __riscv_vle32_v_f32m4(ip, vl);
+    vfloat32m4_t v_x1y0 = __riscv_vle32_v_f32m4(ip + input_x_offset, vl);
+    vfloat32m4_t v_x0y1 = __riscv_vle32_v_f32m4(ip + input_y_offset, vl);
+    vfloat32m4_t v_x1y1 = __riscv_vle32_v_f32m4(
+        ip + input_x_offset + input_y_offset, vl);
+
+    float* op = &output_data[Offset(output_shape, batch, y, x, ic)];
+    __riscv_vse32_v_f32m4(op, v_x0y0, vl);
+
+    vfloat32m4_t tr = __riscv_vfmul_vf_f32m4(
+        __riscv_vfadd_vv_f32m4(v_x0y0, v_x1y0, vl), 0.5f, vl);
+    __riscv_vse32_v_f32m4(op + output_x_offset, tr, vl);
+
+    vfloat32m4_t bl = __riscv_vfmul_vf_f32m4(
+        __riscv_vfadd_vv_f32m4(v_x0y0, v_x0y1, vl), 0.5f, vl);
+    __riscv_vse32_v_f32m4(op + output_y_offset, bl, vl);
+
+    vfloat32m4_t br_sum = __riscv_vfadd_vv_f32m4(v_x1y0, v_x1y1, vl);
+    vfloat32m4_t br = __riscv_vfmul_vf_f32m4(
+        __riscv_vfmacc_vf_f32m4(bl, 0.5f, br_sum, vl), 0.5f, vl);
+    __riscv_vse32_v_f32m4(op + output_x_offset + output_y_offset, br, vl);
+
+    ic += vl;
+  }
 #else
   for (int ch = 0; ch < depth; ch++) {
     const int32 input_offset = Offset(input_shape, batch, y0, x0, ch);
