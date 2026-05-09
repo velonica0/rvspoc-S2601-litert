@@ -25,8 +25,6 @@ limitations under the License.
 #include "NEON_2_SSE.h"  // IWYU pragma: export
 #endif
 
-#include "tflite/kernels/internal/optimized/rvv_check.h"
-
 // NEON_OR_PORTABLE(SomeFunc, args) calls NeonSomeFunc(args) if USE_NEON is
 // defined, PortableSomeFunc(args) otherwise.
 #ifdef USE_NEON

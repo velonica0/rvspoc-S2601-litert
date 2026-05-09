@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/internal/optimized/cpu_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {

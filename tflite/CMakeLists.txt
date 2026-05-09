@@ -633,7 +633,7 @@ if(_TFLITE_ENABLE_RUY)
 endif()
 populate_tflite_source_vars("kernels"
   TFLITE_KERNEL_SRCS
-  FILTER "([^/]*_test_util_internal|test_[^/]*|[^/]*_ops_wrapper|rvv_.*_test|rvv_benchmark)\\.(cc|h)$"
+  FILTER "([^/]*_test_util_internal|test_[^/]*|[^/]*_ops_wrapper|rvv_.*_test|rvv_benchmark|rvv_speedup)\\.(cc|h)$"
 )
 populate_tflite_source_vars("kernels/internal" TFLITE_KERNEL_INTERNAL_SRCS)
 populate_tflite_source_vars("kernels/internal/optimized"
@@ -850,6 +850,12 @@ add_executable(rvv_standalone_test
   ${TFLITE_SOURCE_DIR}/kernels/rvv_standalone_test.cc
 )
 target_link_libraries(rvv_standalone_test tensorflow-lite)
+
+# RVV vs Scalar speedup comparison
+add_executable(rvv_speedup_test
+  ${TFLITE_SOURCE_DIR}/kernels/rvv_speedup_test.cc
+)
+target_link_libraries(rvv_speedup_test tensorflow-lite)
 
 # Add the generated headers directory. Required for maintaining the
 # tensorflow/lite directory structure for generated headers.

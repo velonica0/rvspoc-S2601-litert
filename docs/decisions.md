@@ -14,7 +14,7 @@
 
 **Rationale**: The challenge mandates VLEN 128/256/512 adaptive support. Strip-mining with `vsetvl` handles arbitrary VLEN, including odd remainders, without a scalar tail loop.
 
-**NEON contrast**: NEON uses fixed `i += 16` loops with separate `i += 8` and `i += 4` cleanup loops plus a final scalar loop. RVV's `vsetvl` unifies all these into a single loop.
+**NEON contrast**: NEON uses fixed `i += 16` loops with separate `i += 8` and `i += 4` cleanup loops plus a final scalar loop. RVV's `vsetvl` unifies all these into a single loop — this is why `rvv_tensor_utils.cc` (847 lines) is much shorter than `neon_tensor_utils.cc` (2806 lines) despite covering the same functions.
 
 ## 3. LMUL Selection
 
@@ -22,7 +22,7 @@
 
 **Rationale**: The widening chain from int8 to int32 requires 4x the register width. Starting at m1 for the narrowest type and widening naturally fills m4 for the widest, which is the maximum that allows further widening to m8. This balances register pressure against throughput.
 
-## 4. Placement of RVV Blocks
+## 4. Placement of RVV Blocks in Operator Headers
 
 **Decision**: Use `#elif defined(USE_RVV)` after `#ifdef USE_NEON` blocks rather than independent `#ifdef USE_RVV` blocks.
 
@@ -45,3 +45,32 @@
 **Decision**: Reuse `Register_XXX_NEON_OPT()` for RVV by changing `#ifdef USE_NEON` to `#if defined(USE_NEON) || defined(USE_RVV)` in the dispatch functions.
 
 **Rationale**: The "NEON_OPT" variant name is misleading but the actual effect is simply to route through the `optimized_integer_ops` namespace, which contains both NEON and RVV code paths guarded by their respective `#ifdef`s. Creating separate `Register_XXX_RVV_OPT()` functions would duplicate code for no benefit.
+
+## 8. Tensor Utils: Separate `rvv_tensor_utils.h` Dispatch Header
+
+**Decision**: Create a standalone `rvv_tensor_utils.h` with direct `RvvXxx()` calls, and have `neon_tensor_utils.h` redirect to it via `#ifdef USE_RVV` at the top.
+
+**Rationale**: `neon_tensor_utils.h` is actually a dispatch layer that uses the `NEON_OR_PORTABLE` macro. Rather than relying on the macro for RVV dispatch, we create a clean parallel header (`rvv_tensor_utils.h`) that calls `RvvXxx()` directly. This avoids modifying any NEON logic and keeps the RVV dispatch self-contained.
+
+**Structure**:
+```
+neon_tensor_utils.h
+├── #ifdef USE_RVV → includes rvv_tensor_utils.h
+│   ├── rvv_tensor_utils_impl.h (RVV declarations)
+│   └── portable_tensor_utils_impl.h (fallback)
+└── #else → original NEON_OR_PORTABLE dispatch
+    ├── neon_tensor_utils_impl.h
+    └── portable_tensor_utils_impl.h
+```
+
+## 9. Sigmoid/Tanh Remain on Portable
+
+**Decision**: `RvvApplySigmoid` and `RvvApplyTanh` delegate to `PortableApplySigmoid` / `PortableApplyTanh` instead of implementing RVV versions.
+
+**Rationale**: The NEON implementations use `gemmlowp::FixedPoint<int16x8_t, N>` template specializations for vectorized fixed-point logistic/tanh lookup tables. These specializations only exist for NEON vector types (`int16x8_t`). There is no gemmlowp specialization for RVV types. Implementing a custom RVV LUT-based sigmoid/tanh would require reimplementing the gemmlowp fixed-point math library for RVV, which is out of scope.
+
+## 10. aarch64 Inline Assembly Not Ported
+
+**Decision**: The ~557 lines of `#ifdef __aarch64__` code in `neon_tensor_utils.cc` (dotprod GEMV, ShuffleVectors, sdot detection) are not ported to RVV.
+
+**Rationale**: This code uses ARM-specific instructions (`sdot`, `smmla`, `st4`) and register conventions via inline assembly. The equivalent RVV approach is different — RVV's `vwmul`/`vwmacc` handle the widening multiply-accumulate directly without needing data shuffling. The RVV int8 GEMV implementation uses intrinsics-based dot products instead. Complex variants that need Ruy/GEMM backends delegate to Portable.

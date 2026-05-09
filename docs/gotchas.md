@@ -28,4 +28,32 @@ The `kNeonOptimized` enum value and `Register_XXX_NEON_OPT()` function names are
 
 ## 7. Build on Target Hardware
 
-The target machine is `ssh 192.168.5.211` (openkylin). CMake on RISC-V should auto-detect `CMAKE_SYSTEM_PROCESSOR` as `riscv64`. The RVV compiler flag `-march=rv64gcv` enables vector intrinsics. Some toolchains may need `-march=rv64gcv_zba_zbb` for additional extensions.
+The target machine is `ssh 192.168.5.211` (openkylin, password: openkylin). CMake on RISC-V auto-detects `CMAKE_SYSTEM_PROCESSOR` as `riscv64`. The RVV compiler flag `-march=rv64gcv` enables vector intrinsics. The Spacemit X100 CPU supports `rv64imafdcv` plus many extensions (zba, zbb, zbc, zbs, zvbb, zvfh, etc.).
+
+Build command:
+```bash
+mkdir build && cd build
+cmake ../tflite -DTFLITE_ENABLE_XNNPACK=OFF -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_FLAGS="-march=rv64gcv"
+make -j8 rvv_standalone_test rvv_speedup_test
+```
+
+## 8. XNNPACK Build Is Very Slow on RISC-V
+
+Building with `-DTFLITE_ENABLE_XNNPACK=ON` (default) takes 30+ minutes on the Spacemit X100 due to thousands of XNNPACK microkernel source files. Use `-DTFLITE_ENABLE_XNNPACK=OFF` for faster iteration when testing only the RVV kernel changes. XNNPACK has its own RISC-V optimizations that are independent of our work.
+
+## 9. Test Framework Has Broken Path on This Repo
+
+`-DTFLITE_KERNEL_TEST=ON` fails with a missing `schema_conversion_utils.cc` file (expected at `compiler/mlir/lite/schema/` but actually at `tflite/converter/schema/`). Workaround: add test executables directly in the main `tflite/CMakeLists.txt` instead of through the test framework. The standalone tests (`rvv_standalone_test.cc`, `rvv_speedup_test.cc`) are self-contained and don't depend on gtest.
+
+## 10. `neon_tensor_utils.h` Is a Dispatch Layer, Not NEON-Specific
+
+Despite its name, `neon_tensor_utils.h` is the central dispatch layer for tensor utility functions. On RVV platforms, it `#include`s `rvv_tensor_utils.h` and skips the entire NEON/Portable dispatch block. On non-RVV platforms, it uses the `NEON_OR_PORTABLE` macro as before. Don't add RVV-specific code directly to `neon_tensor_utils.h` — put it in `rvv_tensor_utils.h` instead.
+
+## 11. `vfredusum` Is Unordered Reduction
+
+RVV's `vfredusum` performs unordered floating-point reduction (allows reassociation). This is fine for our use cases (dot products, sums) since we don't need strict IEEE ordering. If strict ordering were needed, use `vfredosum` instead — but it serializes the reduction and is much slower.
+
+## 12. Per-Channel Quantize in Depthwise Conv Uses Vector Shift Amounts
+
+The `Quantize()` function in `optimized_ops.h` applies per-channel multipliers and shifts. The NEON version loads shift amounts into vector registers and uses `vrshlq_s32` (which accepts negative shifts as right shifts). The RVV version must split into separate left-shift and right-shift operations since RVV shift intrinsics only accept unsigned shift amounts.

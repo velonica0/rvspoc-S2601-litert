@@ -30,6 +30,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv_3x3_filter.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reference/depthwiseconv_uint8.h"
 #include "tflite/kernels/internal/types.h"
 
