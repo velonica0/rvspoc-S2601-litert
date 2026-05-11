@@ -23,6 +23,7 @@ limitations under the License.
 #include "tflite/kernels/cpu_backend_gemm_custom_gemv.h"
 #include "tflite/kernels/cpu_backend_gemm_params.h"
 #include "tflite/kernels/cpu_backend_gemm_ruy.h"
+#include "tflite/kernels/cpu_backend_gemm_rvv.h"
 
 #ifndef TFLITE_WITH_RUY
 #include "tflite/kernels/cpu_backend_gemm_eigen.h"
@@ -130,6 +131,25 @@ void Gemm(const MatrixParams<LhsScalar>& lhs_params, const LhsScalar* lhs_data,
     TFLITE_DCHECK(false);
     return;
   }
+#ifdef USE_RVV
+  // RVV GEMM: try before Ruy/Eigen/gemmlowp. Handles row-major LHS x
+  // col-major RHS only; returns false for other layouts.
+  if constexpr (std::is_same_v<LhsScalar, float> &&
+                std::is_same_v<DstScalar, float>) {
+    if (detail::RvvGemmFloat(lhs_params, lhs_data, rhs_params, rhs_data,
+                             dst_params, dst_data, params, context)) {
+      return;
+    }
+  }
+  if constexpr (std::is_same_v<LhsScalar, RhsScalar> &&
+                !std::is_floating_point_v<LhsScalar>) {
+    if (detail::RvvGemmQuantized<LhsScalar, DstScalar, quantization_flavor>(
+            lhs_params, lhs_data, rhs_params, rhs_data, dst_params, dst_data,
+            params, context)) {
+      return;
+    }
+  }
+#endif  // USE_RVV
   // In some cases we want to unconditionally use ruy as the backend, overriding
   // the `tflite_with_ruy` setting and the platform default.
   bool must_use_ruy = false;
