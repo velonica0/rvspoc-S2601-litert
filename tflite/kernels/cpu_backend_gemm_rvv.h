@@ -35,22 +35,24 @@ namespace cpu_backend_gemm {
 namespace detail {
 
 // ============================================================
-// Float GEMM
+// Float GEMM — row-partitioned multi-threaded
 // ============================================================
+// Each thread owns disjoint rows of LHS (no cache contention).
+// All threads read the same RHS columns (read-only, shared in L2).
+// C[row][col] = sum_k(LHS[row][k] * RHS[k][col]) + bias[row]
 
-inline void RvvGemmFloatImpl(const float* lhs, const float* rhs,
-                             float* dst, const float* bias,
-                             int rows, int depth, int cols,
-                             float clamp_min, float clamp_max,
-                             int col_start, int col_end) {
-  for (int col = col_start; col < col_end; col++) {
+inline void RvvGemmFloatRowBlock(
+    const float* lhs, const float* rhs, float* dst, const float* bias,
+    int total_rows, int depth, int cols,
+    float clamp_min, float clamp_max,
+    int row_start, int row_end) {
+  for (int col = 0; col < cols; col++) {
     const float* rhs_col = rhs + col * depth;
-    float* dst_col = dst + col * rows;
-    for (int row = 0; row < rows; row++) {
+    for (int row = row_start; row < row_end; row++) {
       const float* lhs_row = lhs + row * depth;
       size_t vl;
       vfloat32m4_t acc = __riscv_vfmv_v_f_f32m4(0.0f,
-                                                   __riscv_vsetvl_e32m4(1));
+                                                   __riscv_vsetvl_e32m4(depth));
       for (int k = 0; k < depth; k += vl) {
         vl = __riscv_vsetvl_e32m4(depth - k);
         vfloat32m4_t a = __riscv_vle32_v_f32m4(lhs_row + k, vl);
@@ -63,7 +65,7 @@ inline void RvvGemmFloatImpl(const float* lhs, const float* rhs,
       float result = __riscv_vfmv_f_s_f32m1_f32(s);
       if (bias) result += bias[row];
       result = std::min(clamp_max, std::max(clamp_min, result));
-      dst_col[row] = result;
+      dst[col * total_rows + row] = result;
     }
   }
 }
@@ -73,12 +75,12 @@ struct RvvGemmFloatTask : cpu_backend_threadpool::Task {
   const float* rhs;
   float* dst;
   const float* bias;
-  int rows, depth, cols;
+  int total_rows, depth, cols;
   float clamp_min, clamp_max;
-  int col_start, col_end;
+  int row_start, row_end;
   void Run() override {
-    RvvGemmFloatImpl(lhs, rhs, dst, bias, rows, depth, cols,
-                     clamp_min, clamp_max, col_start, col_end);
+    RvvGemmFloatRowBlock(lhs, rhs, dst, bias, total_rows, depth, cols,
+                         clamp_min, clamp_max, row_start, row_end);
   }
 };
 
@@ -97,23 +99,26 @@ inline bool RvvGemmFloat(
   const int depth = lhs_params.cols;
   const int cols = rhs_params.cols;
   const int num_threads =
-      std::min(context->max_num_threads(), std::max(1, cols));
+      std::min(context->max_num_threads(), std::max(1, rows));
 
   if (num_threads <= 1) {
-    RvvGemmFloatImpl(lhs_data, rhs_data, dst_data, params.bias, rows, depth,
-                     cols, params.clamp_min, params.clamp_max, 0, cols);
+    RvvGemmFloatRowBlock(lhs_data, rhs_data, dst_data, params.bias,
+                         rows, depth, cols,
+                         params.clamp_min, params.clamp_max, 0, rows);
     return true;
   }
+
   std::vector<RvvGemmFloatTask> tasks(num_threads);
-  int cs = 0;
+  int rs = 0;
   for (int i = 0; i < num_threads; i++) {
-    int ce = cs + (cols - cs) / (num_threads - i);
+    int re = rs + (rows - rs) / (num_threads - i);
     auto& t = tasks[i];
     t.lhs = lhs_data; t.rhs = rhs_data; t.dst = dst_data;
-    t.bias = params.bias; t.rows = rows; t.depth = depth; t.cols = cols;
+    t.bias = params.bias;
+    t.total_rows = rows; t.depth = depth; t.cols = cols;
     t.clamp_min = params.clamp_min; t.clamp_max = params.clamp_max;
-    t.col_start = cs; t.col_end = ce;
-    cs = ce;
+    t.row_start = rs; t.row_end = re;
+    rs = re;
   }
   cpu_backend_threadpool::Execute(num_threads, tasks.data(), context);
   return true;
@@ -133,7 +138,7 @@ inline bool RvvGemmFloat(
 
 inline int32_t RvvDotI8(const int8_t* a, const int8_t* b, int len) {
   size_t vl;
-  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(1));
+  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(len));
   for (int k = 0; k < len; k += vl) {
     vl = __riscv_vsetvl_e8m1(len - k);
     vint8m1_t va = __riscv_vle8_v_i8m1(a + k, vl);
@@ -149,7 +154,7 @@ inline int32_t RvvDotI8(const int8_t* a, const int8_t* b, int len) {
 
 inline int32_t RvvSumI8(const int8_t* data, int len) {
   size_t vl;
-  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(1));
+  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(len));
   for (int k = 0; k < len; k += vl) {
     vl = __riscv_vsetvl_e8m1(len - k);
     vint8m1_t v = __riscv_vle8_v_i8m1(data + k, vl);
@@ -164,7 +169,7 @@ inline int32_t RvvSumI8(const int8_t* data, int len) {
 
 inline int32_t RvvDotU8(const uint8_t* a, const uint8_t* b, int len) {
   size_t vl;
-  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(1));
+  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(len));
   for (int k = 0; k < len; k += vl) {
     vl = __riscv_vsetvl_e8m1(len - k);
     vuint8m1_t va = __riscv_vle8_v_u8m1(a + k, vl);
@@ -184,7 +189,7 @@ inline int32_t RvvDotU8(const uint8_t* a, const uint8_t* b, int len) {
 
 inline int32_t RvvSumU8(const uint8_t* data, int len) {
   size_t vl;
-  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(1));
+  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, __riscv_vsetvl_e32m4(len));
   for (int k = 0; k < len; k += vl) {
     vl = __riscv_vsetvl_e8m1(len - k);
     vuint8m1_t v = __riscv_vle8_v_u8m1(data + k, vl);

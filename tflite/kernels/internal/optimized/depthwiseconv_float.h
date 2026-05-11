@@ -872,9 +872,11 @@ inline void FloatDepthwiseConvAccumRowGeneric(
           size_t vl = __riscv_vsetvl_e32m4(input_depth - ic);
           vfloat32m4_t acc_v =
               __riscv_vle32_v_f32m4(acc_buffer_ptr + ic, vl);
+          vfloat32m4_t in_v =
+              __riscv_vle32_v_f32m4(input_ptr + ic, vl);
           vfloat32m4_t filt_v =
               __riscv_vle32_v_f32m4(filter_ptr + ic, vl);
-          acc_v = __riscv_vfmacc_vf_f32m4(acc_v, input_ptr[ic], filt_v, vl);
+          acc_v = __riscv_vfmacc_vv_f32m4(acc_v, in_v, filt_v, vl);
           __riscv_vse32_v_f32m4(acc_buffer_ptr + ic, acc_v, vl);
           ic += vl;
         }

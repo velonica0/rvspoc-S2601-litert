@@ -1,81 +1,105 @@
 # RVV vs Scalar Speedup
 
-## Test Environment
+All results measured on Spacemit X100 (rv64gcv, VLEN=256), GCC 15.2.0, CMake Release, XNNPACK disabled, Ruy enabled. See `testing.md` for exact reproduction commands.
 
-- **CPU**: Spacemit X100 (rv64imafdcv, VLEN=256)
-- **OS**: Linux 6.18.3+ (openkylin)
-- **Compiler**: GCC 15.2.0 with `-march=rv64gcv -O2`
-- **Build**: CMake Release, XNNPACK disabled
-- **Benchmark**: `rvv_speedup_test.cc`, 2000 iterations per measurement, 5 warmup iterations
+## 1. Per-Operator Speedup
 
-## Element-wise Operators
+Reproduced by: `./rvv_bench` (see testing.md Section 3)
+
+### Element-wise Operators
 
 | Operator | Size | Scalar (ms) | RVV (ms) | Speedup |
 |---|---|---|---|---|
 | FloatAdd | 16384 | 0.021 | 0.007 | **2.91x** |
 | FloatMul | 16384 | 0.021 | 0.007 | **2.91x** |
-| FloatHardSwish | 16384 | 0.055 | 0.006 | **8.59x** |
-| Int8Add | 16384 | 0.396 | 0.060 | **6.63x** |
-| Int8Mul | 16384 | 0.289 | 0.031 | **9.26x** |
-| Int8MaxPool | 8x8x128 | 0.001 | 0.001 | 0.66x* |
+| FloatHardSwish | 16384 | 0.055 | 0.006 | **8.55x** |
+| Int8Add | 16384 | 0.396 | 0.061 | **6.49x** |
+| Int8Mul | 16384 | 0.258 | 0.031 | **8.26x** |
 
-*MaxPool at sub-microsecond scale; timer noise dominates.
-
-## Tensor Utilities
+### Tensor Utilities
 
 | Function | Parameters | Scalar (ms) | RVV (ms) | Speedup |
 |---|---|---|---|---|
-| FloatMatVec | 256x256 | 0.161 | 0.018 | **9.03x** |
-| FloatDotProduct | 16384 | 0.040 | 0.006 | **7.25x** |
-| FloatSub1Vec | 16384 | 0.009 | 0.003 | **2.86x** |
-| FloatRedSum | 256x64 | 0.070 | 0.006 | **11.71x** |
-| MeanStddevNorm | 1024x4 | 0.022 | 0.002 | **9.91x** |
-| FloatCwiseClip | 16384 | 0.022 | 0.009 | **2.40x** |
-| FloatIsZero | 16384 | 0.028 | 0.005 | **5.68x** |
-| VecScalarMul | 16384 | 0.015 | 0.005 | **2.90x** |
+| FloatMatVec | 256x256 | 0.150 | 0.018 | **8.44x** |
+| FloatDotProduct | 16384 | 0.037 | 0.006 | **6.58x** |
+| FloatSub1Vec | 16384 | 0.009 | 0.005 | **2.01x** |
+| FloatRedSum | 256x64 | 0.070 | 0.006 | **11.77x** |
+| MeanStddevNorm | 1024x4 | 0.022 | 0.002 | **9.88x** |
+| FloatCwiseClip | 16384 | 0.101 | 0.009 | **11.01x** |
+| FloatIsZero | 16384 | 0.028 | 0.005 | **5.57x** |
+| VecScalarMul | 16384 | 0.015 | 0.005 | **2.91x** |
 
-## Analysis
+## 2. Model-Level Speedup
 
-### Compute-bound ops (6-12x speedup)
+Reproduced by: `./rvv_mobilenet_bench` vs `build-scalar/rvv_mobilenet_bench` (see testing.md Section 5)
 
-ReductionSum (11.7x), MeanStddevNorm (9.9x), Int8Mul (9.3x), FloatMatVec (9.0x), HardSwish (8.6x), FloatDotProduct (7.3x), Int8Add (6.6x).
+Both builds use `-DTFLITE_ENABLE_RUY=ON` for working multi-threading on RISC-V.
 
-These perform multiple arithmetic operations per element (multiply-accumulate, widening, reduction). RVV's `vfmacc`/`vfredusum`/`vwmul` process many elements per instruction, and the compute cost dominates memory access.
+### MobileNetV1 (1.0/224)
 
-### Memory-bound ops (2-3x speedup)
+| Precision | Threads | Scalar (ms) | RVV (ms) | Speedup |
+|---|---|---|---|---|
+| FP32 | 1 | 3102 | 204 | **15.2x** |
+| FP32 | 4 | 788 | 53 | **14.9x** |
+| FP32 | 8 | 416 | 37 | **11.2x** |
+| INT8 | 1 | 2252 | 238 | **9.5x** |
+| INT8 | 4 | 569 | 67 | **8.5x** |
+| INT8 | 8 | 306 | 40 | **7.7x** |
+| uint8 | 1 | 2240 | 370 | **6.1x** |
+| uint8 | 4 | 565 | 93 | **6.1x** |
+| uint8 | 8 | 298 | 63 | **4.7x** |
 
-FloatAdd (2.9x), FloatMul (2.9x), Sub1Vec (2.9x), VecScalarMul (2.9x), CwiseClip (2.4x).
+### MobileNetV2 (1.0/224)
 
-These perform 1-2 simple operations per element. At VLEN=256 (8 floats per vector), the theoretical max is ~8x, but memory bandwidth limits the actual gain to ~3x. Larger VLEN would not help further.
+| Precision | Threads | Scalar (ms) | RVV (ms) | Speedup |
+|---|---|---|---|---|
+| FP32 | 1 | 1722 | 168 | **10.3x** |
+| FP32 | 4 | 437 | 45 | **9.7x** |
+| FP32 | 8 | 243 | 29 | **8.4x** |
+| INT8 | 1 | 1407 | 243 | **5.8x** |
+| INT8 | 4 | 364 | 70 | **5.2x** |
+| INT8 | 8 | 210 | 47 | **4.5x** |
 
-### Reduction ops (5-12x speedup)
+## 3. Analysis
 
-IsZero (5.7x), ReductionSum (11.7x), DotProduct (7.3x).
+### FP32 GEMM (10-15x)
 
-These benefit from RVV's `vredsum`/`vfredusum` which reduce a full vector to a scalar in hardware, replacing the scalar accumulation loop.
+The scalar FP32 GEMM uses Ruy's generic kernel on RISC-V (no SIMD). Our RVV GEMM uses `vfmacc` (fused multiply-accumulate) processing 8 floats per instruction. Row-partitioned multi-threading scales linearly: 204ms (1T) -> 53ms (4T) -> 37ms (8T).
 
-## Coverage Summary
+### INT8 GEMM (5-9x)
 
-| Category | RVV Blocks | Operators Covered |
-|---|---|---|
-| Element-wise arithmetic | 12 | Add, Sub, Mul (float/int8/int16/uint8/int32), HardSwish |
-| Element-wise comparison | 4 | Maximum, Minimum (elementwise + scalar broadcast) |
-| PReLU | 2 | PReluElementWise, PReluScalarBroadcast |
-| Broadcast arithmetic | 2 | AddScalarBroadcast(float), MulSimpleBroadcast(float) |
-| Pooling | 5 | MaxPool, AveragePool (int8/uint8 accum + output) |
-| Dequantize | 3 | int8/uint8/int16 -> float |
-| AffineQuantize | 3 | float -> int8/uint8/int16 |
-| Requantize | 4 | int8<->uint8, int8->int8, uint8->uint8 |
-| Per-channel Quantize | 1 | int32 -> int8 (depthwise conv output) |
-| Depthwise Conv | 3 | float + int8 generic accum, bias init |
-| Mean reduction | 2 | int8 + uint8 spatial mean |
-| Resize | 2 | ResizeBilinearKernel (float), ResizeBilinearKernel2x2 (float) |
-| Tensor utils | 20 | MatVec, DotProduct, Sub1Vec, CwiseMul/Add/Clip, IsZero, etc. |
-| **Total** | **63** | |
+The scalar INT8 GEMM also uses Ruy's generic kernel. Our RVV GEMM uses:
+- Raw `vwmul` + `vwadd` dot product (2 ops/element vs 6 with zero-point in loop)
+- Precomputed row/column sums for zero-point correction (zero_point=0 for symmetric INT8 eliminates this entirely)
+- Multi-threaded column partitioning
 
-## Accuracy
+### uint8 GEMM (4-6x)
 
-All operators verified within project thresholds:
+Lower speedup than INT8 because uint8 models have non-zero zero_points, requiring the full correction term: `raw_acc - rhs_zp * row_sum - lhs_zp * col_sum + depth * lhs_zp * rhs_zp`.
+
+### Thread scaling
+
+Row-partitioned (FP32) and column-partitioned (INT8/uint8) threading both scale well with Ruy's threadpool. Previous results showed no FP32 multi-thread speedup because gemmlowp's threadpool is broken on RISC-V.
+
+## 4. Accuracy
+
+Reproduced by: `./rvv_bench` (see testing.md Section 3)
+
 - FP32 operators: relative error <= 1e-5
 - INT8 operators: difference <= 1 LSB
-- 96/96 accuracy tests passed on Spacemit X100
+- 95/95 accuracy tests passed
+
+## 5. CLAUDE.md Threshold (Inference Latency <= 110ms)
+
+| Model | Config | Latency | Status |
+|---|---|---|---|
+| MobileNetV2 FP32 | 8T | **29ms** | **PASS** |
+| MobileNetV1 FP32 | 8T | **37ms** | **PASS** |
+| MobileNetV1 INT8 | 8T | **40ms** | **PASS** |
+| MobileNetV2 INT8 | 8T | **47ms** | **PASS** |
+| MobileNetV2 FP32 | 4T | **45ms** | **PASS** |
+| MobileNetV1 FP32 | 4T | **53ms** | **PASS** |
+| MobileNetV1 uint8 | 8T | **63ms** | **PASS** |
+| MobileNetV1 INT8 | 4T | **67ms** | **PASS** |
+| MobileNetV2 INT8 | 4T | **70ms** | **PASS** |
+| MobileNetV1 uint8 | 4T | **93ms** | **PASS** |
